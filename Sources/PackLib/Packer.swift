@@ -118,6 +118,8 @@ public struct Packer: Sendable {
         outputURL: URL,
         _ group: inout ThrowingTaskGroup<Void, Error>
     ) throws {
+        let triple = try AppleTriple(buildSettings.triple)
+
         @Sendable func packFileToRoot(srcName: String) async throws {
             let srcURL = URL(fileURLWithPath: srcName)
             let destURL = outputURL.appendingPathComponent(srcURL.lastPathComponent)
@@ -176,10 +178,14 @@ public struct Packer: Sendable {
         group.addTask {
             var info = product.infoPlist
 
-            if product.type == .application {
-                info["UIRequiredDeviceCapabilities"] = ["arm64"]
-                info["LSRequiresIPhoneOS"] = true
-                info["CFBundleSupportedPlatforms"] = ["iPhoneOS"]
+            if product.type.isApplicationBundle {
+                if let requiredDeviceCapabilities = triple.requiredDeviceCapabilities {
+                    info["UIRequiredDeviceCapabilities"] = requiredDeviceCapabilities
+                } else {
+                    info.removeValue(forKey: "UIRequiredDeviceCapabilities")
+                }
+                info["LSRequiresIPhoneOS"] = triple.platformName == "ios"
+                info["CFBundleSupportedPlatforms"] = [triple.bundleSupportedPlatform]
             }
 
             if let iconPath = product.iconPath {
@@ -201,14 +207,14 @@ public struct Packer: Sendable {
 extension Plan.Product {
     fileprivate var linkerSettings: String {
         switch self.type {
-        case .application: """
+        case .application, .appClip: """
         [
             .unsafeFlags([
                 "-Xlinker", "-rpath", "-Xlinker", "@executable_path/Frameworks",
             ]),
         ]
         """
-        case .appExtension: """
+        case .appExtension, .extensionKitExtension: """
         [
             // Link to Foundation framework which implements the _NSExtensionMain entrypoint
             .linkedFramework("Foundation"),
@@ -222,6 +228,17 @@ extension Plan.Product {
             ]),
         ]
         """
+        }
+    }
+}
+
+private extension Plan.ProductType {
+    var isApplicationBundle: Bool {
+        switch self {
+        case .application, .appClip:
+            true
+        case .appExtension, .extensionKitExtension:
+            false
         }
     }
 }

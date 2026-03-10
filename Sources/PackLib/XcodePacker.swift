@@ -54,7 +54,7 @@ public struct XcodePacker {
                 "TARGETED_DEVICE_FAMILY": families.map { "\($0)" }.joined(separator: ","),
             ]
 
-            if product.type == .appExtension {
+            if product.type.isExtensionBundle {
                 buildSettings["APPLICATION_EXTENSION_API_ONLY"] = true
             }
 
@@ -63,7 +63,7 @@ public struct XcodePacker {
             }
 
             let additionalDependencies: [Dependency] = if product.type == .application {
-                plan.extensions.map {
+                plan.bundles.map {
                     Dependency(
                         type: .target,
                         reference: $0.targetName
@@ -74,7 +74,7 @@ public struct XcodePacker {
             }
             return Target(
                 name: product.targetName,
-                type: product.type == .application ? .application : .appExtension,
+                type: product.type.xcodeTargetType,
                 platform: .iOS,
                 deploymentTarget: deploymentTarget,
                 settings: Settings(buildSettings: buildSettings),
@@ -158,6 +158,28 @@ extension Path {
         // which includes the name in the path, and therefore
         // in the Xcode navigator
         self.parent() + self.absolute().lastComponent
+    }
+}
+
+private extension Plan.ProductType {
+    var isExtensionBundle: Bool {
+        switch self {
+        case .appExtension, .extensionKitExtension:
+            true
+        case .application, .appClip:
+            false
+        }
+    }
+
+    var xcodeTargetType: PBXProductType {
+        switch self {
+        case .application:
+            .application
+        case .appExtension, .extensionKitExtension:
+            .appExtension
+        case .appClip:
+            .onDemandInstallCapableApplication
+        }
     }
 }
 

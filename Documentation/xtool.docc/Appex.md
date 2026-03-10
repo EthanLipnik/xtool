@@ -49,8 +49,9 @@ You should already have a bare-bones `xtool.yml` file that describes metadata ab
   version: 1
   bundleID: com.example.Hello
 + product: Hello
-+ extensions:
-+   - product: HelloWidget
++ bundles:
++   - kind: appExtension
++     product: HelloWidget
 +     infoPath: HelloWidget-Info.plist
 ```
 
@@ -78,7 +79,7 @@ App extensions require an `Info.plist` file that tells the system what kind of e
 >
 > For a list of possible `NSExtensionPointIdentifier` values, see [Apple's documentation](https://developer.apple.com/documentation/bundleresources/information-property-list/nsextension/nsextensionpointidentifier) on the subject. You may also need other keys like `NSExtensionPrincipalClass`: refer to Apple's ~better~ legacy [documentation library](https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/AppExtensionKeys.html) for details.
 >
-> Finally, note that the above refers to the old paradigm of **Foundation Extensions**. Apple has started moving towards a newer framework called **ExtensionKit** for recent extension types. The main difference for extension consumers is that you replace `NSExtension -> EXAppExtensionAttributes`, and `NSExtensionPointIdentifier -> EXExtensionPointIdentifier`. xtool doesn't support ExtensionKit yet, but it's [planned](https://github.com/xtool-org/xtool/issues/138).
+> Finally, note that the above refers to the old paradigm of **Foundation Extensions**. Apple has started moving towards a newer framework called **ExtensionKit** for recent extension types. The main difference for extension consumers is that you replace `NSExtension -> EXAppExtensionAttributes`, and `NSExtensionPointIdentifier -> EXExtensionPointIdentifier`. xtool now supports packaging ExtensionKit bundles as well; use `xtool dev add-extension --extension-kit` to scaffold one.
 
 ## Step 4: Code your widget 
 

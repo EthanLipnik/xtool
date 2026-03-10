@@ -152,6 +152,12 @@ let package = Package(
                 .copy("config/test.app"),
             ]
         ),
+        .testTarget(
+            name: "PackLibTests",
+            dependencies: [
+                "PackLib",
+            ]
+        ),
         .target(
             name: "XToolSupport",
             dependencies: [

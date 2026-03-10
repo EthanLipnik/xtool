@@ -87,30 +87,30 @@ public struct Planner: Sendable {
             entitlementsPath: schema.entitlementsPath
         )
 
-        let extensionProducts: [Plan.Product]
-        if let extensions = schema.extensions, !extensions.isEmpty {
-            extensionProducts = try await withThrowingTaskGroup(of: Plan.Product.self) { group in
-                for ext in extensions {
+        let bundleProducts: [Plan.Product]
+        if !schema.bundleDeclarations.isEmpty {
+            bundleProducts = try await withThrowingTaskGroup(of: Plan.Product.self) { group in
+                for bundle in schema.bundleDeclarations {
                     group.addTask {
                         try await product(
                             from: graph,
-                            matching: ext.product,
-                            type: .appExtension,
-                            plist: ext.infoPath,
-                            idSpecifier: ext.bundleID.flatMap(PackSchema.IDSpecifier.bundleID) ?? .orgID(app.bundleID),
+                            matching: bundle.product,
+                            type: bundle.kind.planProductType,
+                            plist: bundle.infoPath,
+                            idSpecifier: bundle.bundleID.flatMap(PackSchema.IDSpecifier.bundleID) ?? .orgID(app.bundleID),
                             iconPath: nil,
-                            rootResources: ext.resources,
-                            entitlementsPath: ext.entitlementsPath
+                            rootResources: bundle.resources,
+                            entitlementsPath: bundle.entitlementsPath
                         )
                     }
                 }
                 return try await group.reduce(into: []) { $0.append($1) }
             }
         } else {
-            extensionProducts = []
+            bundleProducts = []
         }
 
-        return Plan(app: app, extensions: extensionProducts)
+        return Plan(app: app, bundles: bundleProducts)
     }
 
     // swiftlint:disable cyclomatic_complexity function_parameter_count
@@ -176,7 +176,7 @@ public struct Planner: Sendable {
         ]
 
         switch type {
-        case .application:
+        case .application, .appClip:
             infoPlist["UIDeviceFamily"] = [1, 2]
             infoPlist["UISupportedInterfaceOrientations"] = ["UIInterfaceOrientationPortrait"]
             infoPlist["UISupportedInterfaceOrientations~ipad"] = [
@@ -189,6 +189,8 @@ public struct Planner: Sendable {
         case .appExtension:
             // Should set default parameters?
             infoPlist["NSExtension"] = [:] as [String: Sendable]
+        case .extensionKitExtension:
+            infoPlist["EXAppExtensionAttributes"] = [:] as [String: Sendable]
         }
 
         if let plist {
@@ -291,10 +293,10 @@ public struct Planner: Sendable {
 
 public struct Plan: Sendable {
     public var app: Product
-    public var extensions: [Product]
+    public var bundles: [Product]
 
     public var allProducts: [Product] {
-        [app] + extensions
+        [app] + bundles
     }
 
     public enum Resource: Codable, Sendable, Hashable {
@@ -322,12 +324,21 @@ public struct Plan: Sendable {
             switch type {
             case .application:
                 baseDir
-                    .appendingPathComponent(".", isDirectory: true)
             case .appExtension:
                 baseDir
                     .appendingPathComponent("PlugIns", isDirectory: true)
                     .appendingPathComponent(product, isDirectory: true)
                     .appendingPathExtension("appex")
+            case .extensionKitExtension:
+                baseDir
+                    .appendingPathComponent("Extensions", isDirectory: true)
+                    .appendingPathComponent(product, isDirectory: true)
+                    .appendingPathExtension("appex")
+            case .appClip:
+                baseDir
+                    .appendingPathComponent("AppClips", isDirectory: true)
+                    .appendingPathComponent(product, isDirectory: true)
+                    .appendingPathExtension("app")
             }
         }
     }
@@ -335,11 +346,15 @@ public struct Plan: Sendable {
     public enum ProductType: Sendable {
         case application
         case appExtension
+        case extensionKitExtension
+        case appClip
 
         fileprivate var targetSuffix: String {
             switch self {
             case .application: "App"
             case .appExtension: "Extension"
+            case .extensionKitExtension: "ExtensionKitExtension"
+            case .appClip: "AppClip"
             }
         }
 
@@ -347,7 +362,22 @@ public struct Plan: Sendable {
             switch self {
             case .application: "APPL"
             case .appExtension: "XPC!"
+            case .extensionKitExtension: "XPC!"
+            case .appClip: "APPL"
             }
+        }
+    }
+}
+
+private extension PackSchema.BundleKind {
+    var planProductType: Plan.ProductType {
+        switch self {
+        case .appExtension:
+            .appExtension
+        case .extensionKitExtension:
+            .extensionKitExtension
+        case .appClip:
+            .appClip
         }
     }
 }

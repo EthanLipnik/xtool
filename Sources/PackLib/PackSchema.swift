@@ -2,6 +2,12 @@ import Foundation
 import Yams
 import XUtils
 
+public enum PackSchemaBundleKind: String, Codable, Sendable, CaseIterable {
+    case appExtension
+    case extensionKitExtension
+    case appClip
+}
+
 public struct PackSchemaBase: Codable, Sendable {
     public enum Version: Int, Codable, Sendable {
         case v1 = 1
@@ -20,7 +26,17 @@ public struct PackSchemaBase: Codable, Sendable {
     public var iconPath: String?
     public var resources: [String]?
 
+    public var bundles: [BundleDeclaration]?
     public var extensions: [Extension]?
+
+    public struct BundleDeclaration: Codable, Sendable {
+        public var kind: PackSchemaBundleKind
+        public var product: String
+        public var bundleID: String?
+        public var infoPath: String
+        public var resources: [String]?
+        public var entitlementsPath: String?
+    }
 
     public struct Extension: Codable, Sendable {
         public var product: String
@@ -33,6 +49,8 @@ public struct PackSchemaBase: Codable, Sendable {
 
 @dynamicMemberLookup
 public struct PackSchema: Sendable {
+    public typealias BundleKind = PackSchemaBundleKind
+    public typealias BundleDeclaration = PackSchemaBase.BundleDeclaration
     public typealias Extension = PackSchemaBase.Extension
 
     public enum IDSpecifier: Sendable {
@@ -49,6 +67,30 @@ public struct PackSchema: Sendable {
 
     public let base: PackSchemaBase
     public let idSpecifier: IDSpecifier
+
+    public var deprecationWarnings: [String] {
+        var warnings: [String] = []
+        if base.extensions?.isEmpty == false {
+            warnings.append(
+                "warning: `xtool.yml` key `extensions` is deprecated; use `bundles` with `kind: appExtension` instead."
+            )
+        }
+        return warnings
+    }
+
+    public var bundleDeclarations: [BundleDeclaration] {
+        let legacyExtensions = base.extensions?.map {
+            BundleDeclaration(
+                kind: .appExtension,
+                product: $0.product,
+                bundleID: $0.bundleID,
+                infoPath: $0.infoPath,
+                resources: $0.resources,
+                entitlementsPath: $0.entitlementsPath
+            )
+        } ?? []
+        return legacyExtensions + (base.bundles ?? [])
+    }
 
     public init(validating base: PackSchemaBase) throws {
         self.base = base

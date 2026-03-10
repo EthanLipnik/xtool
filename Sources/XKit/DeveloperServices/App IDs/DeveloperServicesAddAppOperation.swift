@@ -242,6 +242,12 @@ public struct DeveloperServicesAddAppOperation: DeveloperServicesOperation {
             apps += plugins.implicitContents.filter { $0.pathExtension.lowercased() == "appex" }
         }
 
+        let appClips = root.appendingPathComponent("AppClips")
+        if appClips.dirExists {
+            // App Clips are embedded app bundles rather than .appex bundles.
+            apps += appClips.implicitContents.filter { $0.pathExtension.lowercased() == "app" }
+        }
+
         let isFreeTeam = try await context.auth.team()?.isFree == true
 
         return try await withThrowingTaskGroup(

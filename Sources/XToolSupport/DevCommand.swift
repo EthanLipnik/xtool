@@ -33,6 +33,7 @@ struct PackOperation {
         let configPath = URL(fileURLWithPath: "xtool.yml")
         if FileManager.default.fileExists(atPath: configPath.path) {
             schema = try await PackSchema(url: configPath)
+            schema.deprecationWarnings.forEach { print($0) }
         } else {
             schema = .default
             print("""
@@ -239,6 +240,8 @@ struct DevCommand: AsyncParsableCommand {
             DevXcodeCommand.self,
             DevBuildCommand.self,
             DevRunCommand.self,
+            DevAddExtensionCommand.self,
+            DevAddAppClipCommand.self,
         ],
         defaultSubcommand: DevRunCommand.self
     )
