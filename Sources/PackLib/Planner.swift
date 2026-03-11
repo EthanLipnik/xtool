@@ -19,10 +19,6 @@ public struct Planner: Sendable {
         return decoder
     }()
 
-    // anything older than this requires bundling the stdlib which
-    // is doable but probably not worth the effort
-    private static let minSupportedIOSVersion = "13.0"
-
     private func buildGraph() async throws -> PackageGraph {
         let dependencyRoot = try await dumpDependencies()
 
@@ -44,7 +40,6 @@ public struct Planner: Sendable {
                 case .success((let dependency, let dump)):
                     packages[dependency.identity] = dump
                 case .failure(_ as CancellationError):
-                    // continue loop
                     break
                 case .failure(let error):
                     group.cancelAll()
@@ -62,7 +57,9 @@ public struct Planner: Sendable {
             }
         }
 
-        let rootPackage = packages[dependencyRoot.identity]!
+        guard let rootPackage = packages[dependencyRoot.identity] else {
+            throw StringError("Could not resolve root package metadata")
+        }
 
         return PackageGraph(
             root: rootPackage,
@@ -72,81 +69,83 @@ public struct Planner: Sendable {
     }
 
     public func createPlan() async throws -> Plan {
-        // TODO: cache plan using (Package.swift+Package.resolved) as the key?
-
         let graph = try await buildGraph()
 
+        let appDeclaration = try schema.appDeclaration
         let app = try await product(
             from: graph,
-            matching: schema.product,
-            type: .application,
-            plist: schema.infoPath,
-            idSpecifier: schema.idSpecifier,
-            iconPath: schema.iconPath,
-            rootResources: schema.resources,
-            entitlementsPath: schema.entitlementsPath
+            declaration: appDeclaration,
+            defaultIDSpecifier: schema.idSpecifier,
+            appBundleID: nil
         )
 
-        let bundleProducts: [Plan.Product]
-        if !schema.bundleDeclarations.isEmpty {
-            bundleProducts = try await withThrowingTaskGroup(of: Plan.Product.self) { group in
-                for bundle in schema.bundleDeclarations {
-                    group.addTask {
-                        try await product(
-                            from: graph,
-                            matching: bundle.product,
-                            type: bundle.kind.planProductType,
-                            plist: bundle.infoPath,
-                            idSpecifier: bundle.bundleID.flatMap(PackSchema.IDSpecifier.bundleID) ?? .orgID(app.bundleID),
-                            iconPath: nil,
-                            rootResources: bundle.resources,
-                            entitlementsPath: bundle.entitlementsPath
-                        )
-                    }
+        let bundleProducts = try await withThrowingTaskGroup(of: Plan.Product.self) { group in
+            for declaration in schema.productDeclarations where declaration.kind != .application {
+                group.addTask {
+                    try await product(
+                        from: graph,
+                        declaration: declaration,
+                        defaultIDSpecifier: schema.idSpecifier ?? .orgID(app.bundleID),
+                        appBundleID: app.bundleID
+                    )
                 }
-                return try await group.reduce(into: []) { $0.append($1) }
             }
-        } else {
-            bundleProducts = []
+            return try await group.reduce(into: []) { $0.append($1) }
         }
 
-        return Plan(app: app, bundles: bundleProducts)
+        return Plan(
+            destination: buildSettings.destination,
+            app: app,
+            bundles: bundleProducts
+        )
     }
 
-    // swiftlint:disable cyclomatic_complexity function_parameter_count
+    // swiftlint:disable cyclomatic_complexity function_body_length
     private func product(
         from graph: PackageGraph,
-        matching name: String?,
-        type: Plan.ProductType,
-        plist: String?,
-        idSpecifier: PackSchema.IDSpecifier,
-        iconPath: String?,
-        rootResources: [String]?,
-        entitlementsPath: String?
+        declaration: PackSchema.ProductDeclaration,
+        defaultIDSpecifier: PackSchema.IDSpecifier?,
+        appBundleID: String?
     ) async throws -> Plan.Product {
         let library = try selectLibrary(
-            from: graph.root.products?.filter { $0.type == .autoLibrary } ?? [],
-            matching: name
+            from: graph.root.products?.filter(\.type.isLibrary) ?? [],
+            matching: declaration.packageProduct
         )
+
+        if let supportedPlatforms = declaration.platforms, !supportedPlatforms.isEmpty {
+            guard supportedPlatforms.contains(buildSettings.destination.platformFamily) else {
+                throw StringError("""
+                Product '\(library.name)' does not support destination '\(buildSettings.destination.rawValue)'.
+                """)
+            }
+        }
+
         var resources: [Plan.Resource] = []
         var visited: Set<String> = []
         var targets = library.targets.map { (graph.root, $0) }
         while let (targetPackage, targetName) = targets.popLast() {
+            let visitKey = "\(targetPackage.name)::\(targetName)"
+            guard visited.insert(visitKey).inserted else { continue }
             guard let target = targetPackage.targets?.first(where: { $0.name == targetName }) else {
                 throw StringError("Could not find target '\(targetName)' in package '\(targetPackage.name)'")
             }
-            guard visited.insert(targetName).inserted else { continue }
+
             if target.moduleType == "BinaryTarget" {
-                resources.append(.binaryTarget(name: targetName))
+                resources.append(.binaryTarget(
+                    name: targetName,
+                    path: target.path ?? targetName
+                ))
             }
             if target.resources?.isEmpty == false {
                 resources.append(.bundle(package: targetPackage.name, target: targetName))
             }
-            for targetName in (target.targetDependencies ?? []) {
+            for targetName in target.targetDependencies ?? [] {
                 targets.append((targetPackage, targetName))
             }
-            for productName in (target.productDependencies ?? []) {
-                let (package, product) = try graph.product(name: productName)
+            for productName in target.productDependencies ?? [] {
+                guard let (package, product) = graph.productIfPresent(name: productName) else {
+                    continue
+                }
                 if product.type == .dynamicLibrary {
                     resources.append(.library(name: productName))
                 }
@@ -154,46 +153,62 @@ public struct Planner: Sendable {
             }
         }
 
-        if let rootResources {
+        if let rootResources = declaration.resources {
             resources += rootResources.map { .root(source: $0) }
         }
 
-        let bundleID = idSpecifier.formBundleID(product: library.name)
-        let deploymentTarget = graph.root.platforms?.first { $0.name == "ios" }?.version
-            ?? Self.minSupportedIOSVersion
+        let idSpecifier = declaration.bundleID.map(PackSchema.IDSpecifier.bundleID)
+            ?? defaultIDSpecifier
+            ?? appBundleID.map(PackSchema.IDSpecifier.orgID)
+        guard let idSpecifier else {
+            throw StringError("Could not resolve bundle ID for '\(library.name)'")
+        }
 
+        let deploymentTarget = graph.deploymentTarget(for: buildSettings.destination.platformFamily)
+            ?? buildSettings.destination.platformFamily.defaultDeploymentTarget
+        let bundleID = idSpecifier.formBundleID(product: library.name)
+        let moduleName = library.targets.first ?? library.name
         var infoPlist: [String: Sendable] = [
             "CFBundleInfoDictionaryVersion": "6.0",
             "CFBundleDevelopmentRegion": "en",
             "CFBundleVersion": "1",
             "CFBundleShortVersionString": "1.0.0",
-            "MinimumOSVersion": deploymentTarget,
             "CFBundleIdentifier": bundleID,
             "CFBundleName": library.name,
             "CFBundleExecutable": library.name,
             "CFBundleDisplayName": library.name,
-            "CFBundlePackageType": type.fourCharCode,
+            "CFBundlePackageType": declaration.kind.planProductType.fourCharCode,
         ]
 
-        switch type {
+        switch buildSettings.destination.platformFamily {
+        case .macOS:
+            infoPlist["LSMinimumSystemVersion"] = deploymentTarget
+        case .iOS, .tvOS, .watchOS, .visionOS:
+            infoPlist["MinimumOSVersion"] = deploymentTarget
+        }
+
+        switch declaration.kind {
         case .application, .appClip:
-            infoPlist["UIDeviceFamily"] = [1, 2]
-            infoPlist["UISupportedInterfaceOrientations"] = ["UIInterfaceOrientationPortrait"]
-            infoPlist["UISupportedInterfaceOrientations~ipad"] = [
-                "UIInterfaceOrientationPortrait",
-                "UIInterfaceOrientationPortraitUpsideDown",
-                "UIInterfaceOrientationLandscapeLeft",
-                "UIInterfaceOrientationLandscapeRight",
-            ]
-            infoPlist["UILaunchScreen"] = [:] as [String: Sendable]
+            if let families = buildSettings.destination.platformFamily.defaultDeviceFamilies {
+                infoPlist["UIDeviceFamily"] = families
+            }
+            if buildSettings.destination.platformFamily == .iOS {
+                infoPlist["UISupportedInterfaceOrientations"] = ["UIInterfaceOrientationPortrait"]
+                infoPlist["UISupportedInterfaceOrientations~ipad"] = [
+                    "UIInterfaceOrientationPortrait",
+                    "UIInterfaceOrientationPortraitUpsideDown",
+                    "UIInterfaceOrientationLandscapeLeft",
+                    "UIInterfaceOrientationLandscapeRight",
+                ]
+                infoPlist["UILaunchScreen"] = [:] as [String: Sendable]
+            }
         case .appExtension:
-            // Should set default parameters?
             infoPlist["NSExtension"] = [:] as [String: Sendable]
         case .extensionKitExtension:
             infoPlist["EXAppExtensionAttributes"] = [:] as [String: Sendable]
         }
 
-        if let plist {
+        if let plist = declaration.infoPath {
             let data = try await Data(reading: URL(fileURLWithPath: plist))
             let info = try PropertyListSerialization.propertyList(from: data, format: nil)
             if let info = info as? [String: Sendable] {
@@ -204,25 +219,26 @@ public struct Planner: Sendable {
         }
 
         return Plan.Product(
-            type: type,
+            type: declaration.kind.planProductType,
             product: library.name,
+            moduleName: moduleName,
             deploymentTarget: deploymentTarget,
             bundleID: bundleID,
             infoPlist: infoPlist,
             resources: resources,
-            iconPath: iconPath,
-            entitlementsPath: entitlementsPath
+            iconPath: declaration.iconPath,
+            entitlementsPath: declaration.entitlementsPath,
+            entryPoint: declaration.effectiveEntryPoint,
+            signingMode: declaration.effectiveSigningMode
         )
     }
+    // swiftlint:enable cyclomatic_complexity function_body_length
 
     private func dumpDependencies() async throws -> PackageDependency {
         let tempDir = try TemporaryDirectory(name: "xtool-dump")
         let tempFileURL = tempDir.url.appendingPathComponent("dump.json")
 
-        // SwiftPM sometimes prints extraneous data to stdout, so ask
-        // it to write the JSON to a temp file instead. See:
-        // https://github.com/xtool-org/xtool/pull/97#discussion_r2203618825
-        _ = try await _dumpAction(
+        _ = try await dumpAction(
             arguments: ["-q", "show-dependencies", "--format", "json", "-o", tempFileURL.path],
             path: buildSettings.packagePath
         )
@@ -234,17 +250,14 @@ public struct Planner: Sendable {
     }
 
     private func dumpPackage(at path: String) async throws -> PackageDump {
-        let data = try await _dumpAction(arguments: ["-q", "describe", "--type", "json"], path: path)
+        let data = try await dumpAction(arguments: ["-q", "describe", "--type", "json"], path: path)
         try Task.checkCancellation()
 
-        // As in dumpDependencies, we may end up with extraneous data, but `describe`
-        // doesn't have a `-o` flag for a clean workaround. Resort to a heuristic,
-        // looking for the opening brace.
         let fromBrace = data.drop(while: { $0 != Character("{").asciiValue })
         return try Self.decoder.decode(PackageDump.self, from: fromBrace)
     }
 
-    private func _dumpAction(arguments: [String], path: String) async throws -> Data {
+    private func dumpAction(arguments: [String], path: String) async throws -> Data {
         let dump = try await buildSettings.swiftPMInvocation(
             forTool: "package",
             arguments: arguments,
@@ -268,21 +281,20 @@ public struct Planner: Sendable {
             let product = products[0]
             if let name, product.name != name {
                 throw StringError("""
-                Product name ('\(product.name)') does not match the 'product' value in the schema ('\(name)')
+                Product name ('\(product.name)') does not match the schema value ('\(name)')
                 """)
             }
             return product
         default:
             guard let name else {
                 throw StringError("""
-                Multiple library products were found (\(products.map(\.name))). Please either:
-                1) Expose exactly one library product, or
-                2) Specify the product you want via the 'product' key in xtool.yml.
+                Multiple library products were found (\(products.map(\.name))). Please specify the product via \
+                `products[].packageProduct` in schema version 2 or `product` in schema version 1.
                 """)
             }
             guard let product = products.first(where: { $0.name == name }) else {
                 throw StringError("""
-                Schema declares a 'product' name of '\(name)' but no matching product was found.
+                Schema declares a product name of '\(name)' but no matching product was found.
                 Found: \(products.map(\.name)).
                 """)
             }
@@ -292,6 +304,7 @@ public struct Planner: Sendable {
 }
 
 public struct Plan: Sendable {
+    public var destination: AppleDestination
     public var app: Product
     public var bundles: [Product]
 
@@ -301,7 +314,7 @@ public struct Plan: Sendable {
 
     public enum Resource: Codable, Sendable, Hashable {
         case bundle(package: String, target: String)
-        case binaryTarget(name: String)
+        case binaryTarget(name: String, path: String)
         case library(name: String)
         case root(source: String)
     }
@@ -309,36 +322,63 @@ public struct Plan: Sendable {
     public struct Product: Sendable {
         public var type: ProductType
         public var product: String
+        public var moduleName: String
         public var deploymentTarget: String
         public var bundleID: String
         public var infoPlist: [String: any Sendable]
         public var resources: [Resource]
         public var iconPath: String?
         public var entitlementsPath: String?
+        public var entryPoint: PackSchema.ProductEntryPoint?
+        public var signingMode: PackSchema.SigningMode
 
         public var targetName: String {
             "\(self.product)-\(self.type.targetSuffix)"
         }
 
-        public func directory(inApp baseDir: URL) -> URL {
+        public func directory(inApp baseDir: URL, destination: AppleDestination) -> URL {
             switch type {
             case .application:
                 baseDir
             case .appExtension:
-                baseDir
-                    .appendingPathComponent("PlugIns", isDirectory: true)
-                    .appendingPathComponent(product, isDirectory: true)
-                    .appendingPathExtension("appex")
+                if destination.platformFamily == .macOS {
+                    baseDir
+                        .appendingPathComponent("Contents", isDirectory: true)
+                        .appendingPathComponent("PlugIns", isDirectory: true)
+                        .appendingPathComponent(product, isDirectory: true)
+                        .appendingPathExtension("appex")
+                } else {
+                    baseDir
+                        .appendingPathComponent("PlugIns", isDirectory: true)
+                        .appendingPathComponent(product, isDirectory: true)
+                        .appendingPathExtension("appex")
+                }
             case .extensionKitExtension:
-                baseDir
-                    .appendingPathComponent("Extensions", isDirectory: true)
-                    .appendingPathComponent(product, isDirectory: true)
-                    .appendingPathExtension("appex")
+                if destination.platformFamily == .macOS {
+                    baseDir
+                        .appendingPathComponent("Contents", isDirectory: true)
+                        .appendingPathComponent("Extensions", isDirectory: true)
+                        .appendingPathComponent(product, isDirectory: true)
+                        .appendingPathExtension("appex")
+                } else {
+                    baseDir
+                        .appendingPathComponent("Extensions", isDirectory: true)
+                        .appendingPathComponent(product, isDirectory: true)
+                        .appendingPathExtension("appex")
+                }
             case .appClip:
-                baseDir
-                    .appendingPathComponent("AppClips", isDirectory: true)
-                    .appendingPathComponent(product, isDirectory: true)
-                    .appendingPathExtension("app")
+                if destination.platformFamily == .macOS {
+                    baseDir
+                        .appendingPathComponent("Contents", isDirectory: true)
+                        .appendingPathComponent("AppClips", isDirectory: true)
+                        .appendingPathComponent(product, isDirectory: true)
+                        .appendingPathExtension("app")
+                } else {
+                    baseDir
+                        .appendingPathComponent("AppClips", isDirectory: true)
+                        .appendingPathComponent(product, isDirectory: true)
+                        .appendingPathExtension("app")
+                }
             }
         }
     }
@@ -361,17 +401,18 @@ public struct Plan: Sendable {
         fileprivate var fourCharCode: String {
             switch self {
             case .application: "APPL"
-            case .appExtension: "XPC!"
-            case .extensionKitExtension: "XPC!"
+            case .appExtension, .extensionKitExtension: "XPC!"
             case .appClip: "APPL"
             }
         }
     }
 }
 
-private extension PackSchema.BundleKind {
+private extension PackSchema.ProductKind {
     var planProductType: Plan.ProductType {
         switch self {
+        case .application:
+            .application
         case .appExtension:
             .appExtension
         case .extensionKitExtension:
@@ -385,7 +426,7 @@ private extension PackSchema.BundleKind {
 private struct PackageDependency: Decodable {
     let identity: String
     let name: String
-    let path: String // on disk
+    let path: String
     let dependencies: [PackageDependency]
 }
 
@@ -425,6 +466,15 @@ private struct PackageDump: Decodable {
                 self = .other
             }
         }
+
+        var isLibrary: Bool {
+            switch self {
+            case .dynamicLibrary, .staticLibrary, .autoLibrary:
+                true
+            case .executable, .other:
+                false
+            }
+        }
     }
 
     struct Product: Decodable {
@@ -435,6 +485,7 @@ private struct PackageDump: Decodable {
 
     struct Target: Decodable {
         let name: String
+        let path: String?
         let moduleType: String
         let productDependencies: [String]?
         let targetDependencies: [String]?
@@ -461,15 +512,16 @@ private struct PackageGraph {
     let packages: [String: PackageDump]
     let packagesByProductName: [String: String]
 
-    func product(name productName: String) throws -> (PackageDump, PackageDump.Product) {
-        guard let packageID = packagesByProductName[productName] else {
-            throw StringError("Could not find package containing product '\(productName)'")
-        }
-        guard let package = packages[packageID] else {
-            throw StringError("Could not find package by id '\(packageID)'")
-        }
-        guard let product = package.products?.first(where: { $0.name == productName }) else {
-            throw StringError("Could not find product '\(productName)' in package '\(packageID)'")
+    func deploymentTarget(for family: ApplePlatformFamily) -> String? {
+        root.platforms?.first(where: { family.packageManifestNames.contains($0.name.lowercased()) })?.version
+    }
+
+    func productIfPresent(name productName: String) -> (PackageDump, PackageDump.Product)? {
+        guard let packageID = packagesByProductName[productName],
+            let package = packages[packageID],
+            let product = package.products?.first(where: { $0.name == productName })
+        else {
+            return nil
         }
         return (package, product)
     }

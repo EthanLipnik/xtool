@@ -6,6 +6,14 @@ import XKit // HTTPClient, stdoutSafe
 import PackLib // ToolRegistry
 
 struct SDKBuilder {
+    static let defaultToolchain = "XcodeDefault.xctoolchain"
+
+    struct PlatformSpec: Sendable {
+        let platform: String
+        let sdkPrefix: String
+        let targetTriples: [String]
+    }
+
     enum Arch: String {
         case x86_64
         case aarch64
@@ -52,15 +60,74 @@ struct SDKBuilder {
         }
     }
 
+    static let platformSpecs: [PlatformSpec] = [
+        .init(
+            platform: "iPhoneOS",
+            sdkPrefix: "iPhoneOS",
+            targetTriples: ["arm64-apple-ios"]
+        ),
+        .init(
+            platform: "iPhoneSimulator",
+            sdkPrefix: "iPhoneSimulator",
+            targetTriples: ["arm64-apple-ios-simulator", "x86_64-apple-ios-simulator"]
+        ),
+        .init(
+            platform: "AppleTVOS",
+            sdkPrefix: "AppleTVOS",
+            targetTriples: ["arm64-apple-tvos"]
+        ),
+        .init(
+            platform: "AppleTVSimulator",
+            sdkPrefix: "AppleTVSimulator",
+            targetTriples: ["arm64-apple-tvos-simulator", "x86_64-apple-tvos-simulator"]
+        ),
+        .init(
+            platform: "WatchOS",
+            sdkPrefix: "WatchOS",
+            targetTriples: ["arm64_32-apple-watchos", "arm64-apple-watchos"]
+        ),
+        .init(
+            platform: "WatchSimulator",
+            sdkPrefix: "WatchSimulator",
+            targetTriples: ["arm64-apple-watchos-simulator", "x86_64-apple-watchos-simulator"]
+        ),
+        .init(
+            platform: "XROS",
+            sdkPrefix: "XROS",
+            targetTriples: ["arm64-apple-xros"]
+        ),
+        .init(
+            platform: "XRSimulator",
+            sdkPrefix: "XRSimulator",
+            targetTriples: ["arm64-apple-xros-simulator", "x86_64-apple-xros-simulator"]
+        ),
+        .init(
+            platform: "MacOSX",
+            sdkPrefix: "MacOSX",
+            targetTriples: ["arm64-apple-macosx", "x86_64-apple-macosx"]
+        ),
+    ]
+
     let input: Input
     let outputPath: String
     let arch: Arch
+    let toolchain: String
+
+    init(
+        input: Input,
+        outputPath: String,
+        arch: Arch,
+        toolchain: String = SDKBuilder.defaultToolchain
+    ) {
+        self.input = input
+        self.outputPath = outputPath
+        self.arch = arch
+        self.toolchain = toolchain
+    }
 
     @discardableResult
     func buildSDK() async throws -> String {
-        // TODO: store relevant info for staleness check
         let sdkVersion = "develop"
-
         let output = URL(fileURLWithPath: outputPath, isDirectory: true)
             .appendingPathComponent("darwin.artifactbundle")
 
@@ -70,47 +137,50 @@ struct SDKBuilder {
             withIntermediateDirectories: true
         )
 
-        // TODO: parallelize these two steps
-        // we need to synchronize progress reporting though
-
         try await installToolset(in: output)
-
         let dev = try await installDeveloper(in: output)
 
-        func sdk(platform: String, prefix: String) throws -> String {
-            let regex = try NSRegularExpression(pattern: #"^\#(prefix)\d+\.\d+\.sdk$"#)
-            let dir = dev.appendingPathComponent("Platforms/\(platform).platform/Developer/SDKs")
+        func sdkName(for spec: PlatformSpec) throws -> String {
+            let regex = try NSRegularExpression(pattern: #"^\#(spec.sdkPrefix)\d+\.\d+\.sdk$"#)
+            let dir = dev.appendingPathComponent("Platforms/\(spec.platform).platform/Developer/SDKs")
             let names = try dir.contents().map(\.lastPathComponent)
             guard let name = names.first(where: {
                 regex.firstMatch(in: $0, range: NSRange($0.startIndex..., in: $0)) != nil
             }) else {
-                throw Console.Error("Could not find SDK for \(platform)/\(prefix)")
+                throw Console.Error("Could not find SDK for \(spec.platform)")
             }
             return name
         }
 
-        func triple(platform: String, sdk: String) -> SDKDefinition.Triple {
-            SDKDefinition.Triple(
-                sdkRootPath: "Developer/Platforms/\(platform).platform/Developer/SDKs/\(sdk)",
-                includeSearchPaths: ["Developer/Platforms/\(platform).platform/Developer/usr/lib"],
-                librarySearchPaths: ["Developer/Platforms/\(platform).platform/Developer/usr/lib"],
-                swiftResourcesPath: "Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift",
-                swiftStaticResourcesPath: "Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift_static",
+        func triple(spec: PlatformSpec, sdk: String) -> SDKDefinition.Triple {
+            let toolchainRoot = "Developer/Toolchains/\(toolchain)"
+            return SDKDefinition.Triple(
+                sdkRootPath: "Developer/Platforms/\(spec.platform).platform/Developer/SDKs/\(sdk)",
+                includeSearchPaths: ["Developer/Platforms/\(spec.platform).platform/Developer/usr/lib"],
+                librarySearchPaths: ["Developer/Platforms/\(spec.platform).platform/Developer/usr/lib"],
+                swiftResourcesPath: "\(toolchainRoot)/usr/lib/swift",
+                swiftStaticResourcesPath: "\(toolchainRoot)/usr/lib/swift_static",
                 toolsetPaths: ["toolset.json"]
             )
         }
 
-        let iPhoneOSSDK = try sdk(platform: "iPhoneOS", prefix: "iPhoneOS")
-        let iPhoneSimSDK = try sdk(platform: "iPhoneSimulator", prefix: "iPhoneSimulator")
-        let macOSSDK = try sdk(platform: "MacOSX", prefix: "MacOSX")
+        var targetTriples: [String: SDKDefinition.Triple] = [:]
+        var resolvedSDKs: [String] = []
+        var resolvedSDKNames: [String: String] = [:]
+        for spec in Self.platformSpecs {
+            let sdk = try sdkName(for: spec)
+            resolvedSDKs.append("\(spec.platform): \(sdk)")
+            resolvedSDKNames[spec.platform] = sdk
+            for tripleName in spec.targetTriples {
+                targetTriples[tripleName] = triple(spec: spec, sdk: sdk)
+            }
+        }
 
-        print("""
-        - \(iPhoneOSSDK)
-        - \(iPhoneSimSDK)
-        - \(macOSSDK)
-        """)
+        try finalizeDeveloper(at: dev, resolvedSDKNames: resolvedSDKNames)
 
+        print(resolvedSDKs.map { "- \($0)" }.joined(separator: "\n"))
         print("[Writing metadata]")
+
         try """
         {
             "schemaVersion": "1.0",
@@ -153,21 +223,19 @@ struct SDKBuilder {
             encoding: .utf8
         )
 
-        let sdkDefinition = SDKDefinition(
-            schemaVersion: "4.0",
-            targetTriples: [
-                "arm64-apple-ios": triple(platform: "iPhoneOS", sdk: iPhoneOSSDK),
-                "arm64-apple-ios-simulator": triple(platform: "iPhoneSimulator", sdk: iPhoneSimSDK),
-                "x86_64-apple-ios-simulator": triple(platform: "iPhoneSimulator", sdk: iPhoneSimSDK),
-                "arm64-apple-macosx": triple(platform: "MacOSX", sdk: macOSSDK),
-                "x86_64-apple-macosx": triple(platform: "MacOSX", sdk: macOSSDK),
-            ]
-        )
-
         let encoder = JSONEncoder()
         try encoder
-            .encode(sdkDefinition)
+            .encode(SDKDefinition(schemaVersion: "4.0", targetTriples: targetTriples))
             .write(to: output.appendingPathComponent("swift-sdk.json"))
+
+        let metadata = SDKToolchainMetadata(
+            toolchain: toolchain,
+            swiftVersion: try await Self.currentSwiftVersionString(),
+            supportedTriples: Self.platformSpecs.flatMap(\.targetTriples)
+        )
+        try encoder
+            .encode(metadata)
+            .write(to: output.appendingPathComponent("xtool-toolchain.json"))
 
         try Data("\(sdkVersion)\n".utf8)
             .write(to: output.appendingPathComponent("darwin-sdk-version.txt"))
@@ -175,10 +243,20 @@ struct SDKBuilder {
         return output.path
     }
 
-    private func installToolset(in output: URL) async throws {
-        // tag from https://github.com/xtool-org/darwin-tools-linux-llvm
-        let darwinToolsVersion = "1.0.1"
+    private static func currentSwiftVersionString() async throws -> String {
+        let pipe = Pipe()
+        let process = Process()
+        process.executableURL = try await ToolRegistry.locate("swift")
+        process.arguments = ["--version"]
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try await process.runUntilExit()
+        return String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
+    private func installToolset(in output: URL) async throws {
+        let darwinToolsVersion = "1.0.1"
         let toolsetDir = output.appendingPathComponent("toolset")
 
         try FileManager.default.createDirectory(
@@ -223,7 +301,6 @@ struct SDKBuilder {
         try await tarExit
     }
 
-    // swiftlint:disable:next cyclomatic_complexity
     private func installDeveloper(in output: URL) async throws -> URL {
         let dev = output.appendingPathComponent("Developer")
 
@@ -235,9 +312,6 @@ struct SDKBuilder {
         case .xip(let inputPath):
             let devStage = output.appendingPathComponent("DeveloperStage")
             try FileManager.default.createDirectory(at: devStage, withIntermediateDirectories: false)
-            // unxip doesn't like cooperative cancellation atm so shield it.
-            // if the user does a ^C during unxip, we'll just wait until extraction
-            // is over before bailing
             wanted = try await Task {
                 try await extractXIP(inputPath: inputPath, outDir: devStage.path)
             }.value
@@ -262,10 +336,17 @@ struct SDKBuilder {
             cleanupStageDir = nil
         }
 
+        let selectedToolchain = appDir.appendingPathComponent("Contents/Developer/Toolchains/\(toolchain)")
+        guard selectedToolchain.dirExists else {
+            throw Console.Error("Could not locate toolchain '\(toolchain)' inside '\(appDir.path)'")
+        }
+
         try FileManager.default.createDirectory(at: dev, withIntermediateDirectories: false)
 
         var toDoDirs: [String] = ["Contents/Developer"]
         var count = 0
+        let platforms = Set(Self.platformSpecs.map(\.platform))
+
         while let next = toDoDirs.popLast() {
             try Task.checkCancellation()
 
@@ -273,19 +354,16 @@ struct SDKBuilder {
             let contents = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey])
             for child in contents {
                 let path = "\(next)/\(child.lastPathComponent)"
-                guard Self.isWanted(path[...]) else { continue }
+                guard Self.isWanted(path[...], toolchain: toolchain, platforms: platforms) else { continue }
 
                 count += 1
                 if let wanted {
                     let progress = Int(Double(count) / Double(wanted) * 100)
                     print("\r[Installing SDKs] \(progress)%", terminator: "")
                     fflush(stdoutSafe)
-                }
-                if count % 100 == 0 {
-                    if wanted == nil {
-                        print("\r[Installing SDKs] Copied \(count) files", terminator: "")
-                        fflush(stdoutSafe)
-                    }
+                } else if count % 100 == 0 {
+                    print("\r[Installing SDKs] Copied \(count) files", terminator: "")
+                    fflush(stdoutSafe)
                     await Task.yield()
                 }
 
@@ -303,7 +381,6 @@ struct SDKBuilder {
         }
 
         if wanted != nil {
-            // otherwise the last log might say 99%
             print("\r[Installing SDKs] 100%", terminator: "")
         }
         print()
@@ -313,22 +390,20 @@ struct SDKBuilder {
             try? FileManager.default.removeItem(at: cleanupStageDir)
         }
 
+        return dev
+    }
+
+    private func finalizeDeveloper(at dev: URL, resolvedSDKNames: [String: String]) throws {
         print("[Finalizing SDKs]")
 
-        /*
-         XCTest and Testing.framework are located in *.platform/Developer/{Library/Frameworks,usr/lib} rather than inside
-         the SDK. These search paths are explicitly included when building tests, which presumably ensures that normal
-         applications don't accidentally link against them in production.
+        for platform in Self.platformSpecs.map(\.platform) {
+            guard let sdkName = resolvedSDKNames[platform] else {
+                throw Console.Error("Could not resolve finalized SDK name for \(platform)")
+            }
 
-         SwiftPM makes no such affordances outside of macOS, so we add the usr/lib path as include/library search paths
-         in the SDK config, and symlink the frameworks into the SDKs (since there's no frameworkSearchPaths option).
-         While this drops a safeguard it's better than not having the testing libs at all.
-         */
-
-        for platform in ["iPhoneOS", "MacOSX", "iPhoneSimulator"] {
             let lib = "../../../../../Library"
             let dest = dev.appendingPathComponent("""
-            Platforms/\(platform).platform/Developer/SDKs/\(platform).sdk\
+            Platforms/\(platform).platform/Developer/SDKs/\(sdkName)\
             /System/Library/Frameworks
             """).path
 
@@ -352,12 +427,8 @@ struct SDKBuilder {
                 withDestinationPath: "\(lib)/PrivateFrameworks/XCTestCore.framework"
             )
         }
-
-        return dev
     }
 
-    // returns the number of files we actually want to keep,
-    // useful for computing progress % during fs traversal
     private func extractXIP(inputPath: String, outDir: String) async throws -> Int {
         let fd = try FileDescriptor.open(inputPath, .readOnly)
         defer { try? fd.close() }
@@ -365,7 +436,6 @@ struct SDKBuilder {
         let length = try fd.seek(offset: 0, from: .end)
         try fd.seek(offset: 0, from: .start)
 
-        // global state, ah well
         let oldDirectory = FileManager.default.currentDirectoryPath
         guard FileManager.default.changeCurrentDirectoryPath(outDir) else {
             throw Console.Error("Could not change directory to '\(outDir)'")
@@ -373,7 +443,6 @@ struct SDKBuilder {
         defer { _ = FileManager.default.changeCurrentDirectoryPath(oldDirectory) }
 
         let inputStream = DataReader.data(readingFrom: fd.rawValue)
-
         let (observer, source) = inputStream.lockstepSplit()
 
         async let readTask: Void = {
@@ -391,19 +460,10 @@ struct SDKBuilder {
             DataReader(data: source),
             options: nil
         )
-
-        // ideally we would filter out the files we don't want at this stage,
-        // speeding up extraction AND entirely avoiding the "Installing SDKs"
-        // post-processing step. However, files in xip archives may be hardlinks
-        // to one another and so we need to handle the case where a file inside
-        // our filter() points to a file outside of it. We might be able to do this
-        // with a double-pass system.
-
         let chunksToFiles = Chunks.transform(
             xipToChunks,
             options: nil
         )
-
         let filesToDisk = Files.transform(
             chunksToFiles,
             options: .init(
@@ -412,9 +472,10 @@ struct SDKBuilder {
             )
         )
 
+        let platforms = Set(Self.platformSpecs.map(\.platform))
         var wanted = 0
         for try await file in filesToDisk {
-            wanted += Self.isWanted(file.name[...]) ? 1 : 0
+            wanted += Self.isWanted(file.name[...], toolchain: toolchain, platforms: platforms) ? 1 : 0
         }
         _ = try await readTask
 
@@ -423,7 +484,11 @@ struct SDKBuilder {
         return wanted
     }
 
-    private static func isWanted(_ path: Substring) -> Bool {
+    private static func isWanted(
+        _ path: Substring,
+        toolchain: String,
+        platforms: Set<String>
+    ) -> Bool {
         var components = path.split(separator: "/")[...]
         if components.first == "." {
             components.removeFirst()
@@ -431,18 +496,7 @@ struct SDKBuilder {
         if components.first?.hasSuffix(".app") == true {
             components.removeFirst()
         }
-        guard SDKEntry.wanted.matches(components) else { return false }
-
-        // TODO: see if we can exclude most dylibs. Seems we need the XCTest ones though.
-
-        if components.count >= 10 && components[components.startIndex + 9] == "prebuilt-modules" && components.starts(
-            with: "Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift"
-                .split(separator: "/")
-        ) {
-            return false
-        }
-
-        return true
+        return SDKEntry.wanted(toolchain: toolchain, platforms: platforms).matches(components)
     }
 }
 
@@ -459,11 +513,16 @@ struct SDKDefinition: Encodable {
     var targetTriples: [String: Triple]
 }
 
+struct SDKToolchainMetadata: Codable, Sendable {
+    var toolchain: String
+    var swiftVersion: String
+    var supportedTriples: [String]
+}
+
 struct SDKEntry {
     var names: Set<Substring>
     var values: [SDKEntry] = []
 
-    // empty = wildcard
     init(_ names: Set<Substring>, _ values: [SDKEntry] = []) {
         self.names = names
         self.values = values
@@ -476,12 +535,10 @@ struct SDKEntry {
     func matches(_ path: ArraySlice<Substring>) -> Bool {
         guard let first = path.first else { return true }
         guard names.isEmpty || names.contains(first) else { return false }
-        if values.isEmpty { return true } // leaf, everything after is good
+        if values.isEmpty { return true }
         let afterName = path.dropFirst()
-        for value in values {
-            if value.matches(afterName) {
-                return true
-            }
+        for value in values where value.matches(afterName) {
+            return true
         }
         return false
     }
@@ -492,21 +549,28 @@ struct SDKEntry {
         return parts.dropFirst().reduce(SDKEntry(parts.first!, values)) { SDKEntry($1, [$0]) }
     }
 
-    static let wanted = E("Contents/Developer", [
-        E("Toolchains/XcodeDefault.xctoolchain/usr/lib", [
-            E("swift"),
-            E("swift_static"),
-            E("clang"),
-        ]),
-        E("Platforms", ["iPhoneOS", "MacOSX", "iPhoneSimulator"].map {
-            E("\($0).platform/Developer", [
-                E("SDKs"),
-                E("Library", [
-                    E("Frameworks"),
-                    E("PrivateFrameworks"),
+    static func wanted(toolchain: String, platforms: Set<String>) -> SDKEntry {
+        E("Contents/Developer", [
+            E("Toolchains/\(toolchain)/usr", [
+                E("lib", [
+                    E("swift"),
+                    E("swift_static"),
+                    E("clang"),
                 ]),
-                E("usr/lib"),
-            ])
-        }),
-    ])
+                E("bin", [
+                    E("swift-plugin-server"),
+                ]),
+            ]),
+            E("Platforms", platforms.sorted().map {
+                E("\($0).platform/Developer", [
+                    E("SDKs"),
+                    E("Library", [
+                        E("Frameworks"),
+                        E("PrivateFrameworks"),
+                    ]),
+                    E("usr/lib"),
+                ])
+            }),
+        ])
+    }
 }

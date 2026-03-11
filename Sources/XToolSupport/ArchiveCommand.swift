@@ -41,10 +41,7 @@ struct ArchiveCommand: AsyncParsableCommand {
         name: .shortAndLong,
         help: "Build with configuration"
     ) var configuration: BuildConfiguration = .release
-
-    @Option(
-        help: "Custom target triple to build for"
-    ) var triple: String?
+    @OptionGroup var destinationOptions: DestinationOptions
 
     @Option(
         help: "Archive output path"
@@ -52,7 +49,9 @@ struct ArchiveCommand: AsyncParsableCommand {
 
     func run() async throws {
         let appURL = try await PackOperation(
-            triple: triple,
+            destination: try destinationOptions.resolvedDestination(),
+            triple: destinationOptions.triple,
+            toolchain: destinationOptions.toolchain,
             buildOptions: .init(configuration: configuration)
         ).run()
 

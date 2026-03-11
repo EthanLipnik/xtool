@@ -19,9 +19,11 @@ struct PackOperation {
         }
     }
 
-    static let defaultTriple = "arm64-apple-ios"
+    static let defaultDestination: AppleDestination = .iOS
 
+    var destination: AppleDestination = Self.defaultDestination
     var triple: String?
+    var toolchain: String?
     var buildOptions = BuildOptions(configuration: .debug)
     var xcode = false
 
@@ -44,7 +46,9 @@ struct PackOperation {
 
         let buildSettings = try await BuildSettings(
             configuration: buildOptions.configuration,
-            triple: triple ?? Self.defaultTriple,
+            destination: destination,
+            triple: triple,
+            toolchain: toolchain,
             options: []
         )
 
@@ -76,18 +80,20 @@ struct PackOperation {
                         let data = try await Data(reading: URL(fileURLWithPath: path))
                         let decoder = PropertyListDecoder()
                         let entitlements = try decoder.decode(Entitlements.self, from: data)
-                        return (product.directory(inApp: bundle), entitlements)
+                        return (product.directory(inApp: bundle, destination: plan.destination), entitlements)
                     }
                 }
                 return try await group.reduce(into: [:]) { $0[$1.0] = $1.1 }
             }
             print("Pseudo-signing...")
-            try await Signer.first().sign(
-                app: bundle,
-                identity: .adhoc,
-                entitlementMapping: mapping,
-                progress: { _ in }
-            )
+            if plan.app.signingMode == .adhoc {
+                try await Signer.first().sign(
+                    app: bundle,
+                    identity: .adhoc,
+                    entitlementMapping: mapping,
+                    progress: { _ in }
+                )
+            }
         }
 
         return bundle
@@ -102,7 +108,10 @@ struct DevXcodeCommand: AsyncParsableCommand {
     )
 
     func run() async throws {
-        try await PackOperation(xcode: true).run()
+        try await PackOperation(
+            destination: .iOS,
+            xcode: true
+        ).run()
     }
 }
 
@@ -121,16 +130,13 @@ struct DevBuildCommand: AsyncParsableCommand {
         help: "Output a .ipa file instead of a .app"
     ) var ipa = false
 
-    @Option(
-        help: ArgumentHelp(
-            "Custom target triple to build for",
-            discussion: "Defaults to '\(PackOperation.defaultTriple)'"
-        )
-    ) var triple: String?
+    @OptionGroup var destinationOptions: DestinationOptions
 
     func run() async throws {
         let url = try await PackOperation(
-            triple: triple,
+            destination: try destinationOptions.resolvedDestination(),
+            triple: destinationOptions.triple,
+            toolchain: destinationOptions.toolchain,
             buildOptions: packOptions
         ).run()
 
@@ -170,6 +176,7 @@ struct DevRunCommand: AsyncParsableCommand {
     )
 
     @OptionGroup var packOptions: PackOperation.BuildOptions
+    @OptionGroup var destinationOptions: DestinationOptions
 
     #if os(macOS)
     @Flag(
@@ -177,29 +184,29 @@ struct DevRunCommand: AsyncParsableCommand {
         help: "Target the iOS Simulator"
     ) var simulator = false
 
-    var triple: String? {
-        if simulator {
-            #if arch(arm64)
-            return "arm64-apple-ios-simulator"
-            #elseif arch(x86_64)
-            return "x86_64-apple-ios-simulator"
-            #else
-            #error("Unsupported architecture")
-            #endif
-        }
-        return nil
-    }
     #else
-    var triple: String? { nil }
     #endif
 
     @OptionGroup var connectionOptions: ConnectionOptions
 
     func run() async throws {
-        let output = try await PackOperation(triple: triple, buildOptions: packOptions).run()
+        let destination = try resolvedDestination()
+        guard destination == .iOS || destination == .iOSSimulator else {
+            throw Console.Error("""
+            `xtool dev run` currently supports iOS device and simulator destinations only. \
+            Use `xtool dev build --destination \(destination.rawValue)` to build other Apple platforms.
+            """)
+        }
+
+        let output = try await PackOperation(
+            destination: destination,
+            triple: destinationOptions.triple,
+            toolchain: destinationOptions.toolchain,
+            buildOptions: packOptions
+        ).run()
 
         #if os(macOS)
-        if simulator {
+        if destination == .iOSSimulator {
             try await SimInstallOperation(path: output).run()
             return
         }
@@ -229,6 +236,15 @@ struct DevRunCommand: AsyncParsableCommand {
             print("\nError: \(error)")
             throw ExitCode.failure
         }
+    }
+
+    private func resolvedDestination() throws -> AppleDestination {
+        #if os(macOS)
+        if simulator {
+            return .iOSSimulator
+        }
+        #endif
+        return try destinationOptions.resolvedDestination()
     }
 }
 

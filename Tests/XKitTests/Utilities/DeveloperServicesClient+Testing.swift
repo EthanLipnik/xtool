@@ -8,6 +8,7 @@
 
 import Foundation
 import XCTest
+import Dependencies
 @testable import XKit
 
 #if false
@@ -33,7 +34,8 @@ extension NetcatAnisetteDataProvider {
 extension ADIDataProvider {
 
     static func test(storage: KeyValueStorage) throws -> ADIDataProvider {
-        try adiProvider(deviceInfo: Config.current.deviceInfo, storage: storage)
+        _ = storage
+        return ADIDataProvider()
     }
 
 }
@@ -41,10 +43,8 @@ extension ADIDataProvider {
 extension GrandSlamClient {
 
     static func test(storage: KeyValueStorage) throws -> GrandSlamClient {
-        try GrandSlamClient(
-            deviceInfo: Config.current.deviceInfo,
-            anisetteProvider: ADIDataProvider.test(storage: storage)
-        )
+        _ = storage
+        return GrandSlamClient()
     }
 
 }
@@ -52,11 +52,41 @@ extension GrandSlamClient {
 extension DeveloperServicesClient {
 
     static func test(storage: KeyValueStorage) throws -> DeveloperServicesClient {
-        try DeveloperServicesClient(
-            loginToken: Config.current.appleID.token,
-            deviceInfo: Config.current.deviceInfo,
-            anisetteProvider: ADIDataProvider.test(storage: storage)
-        )
+        _ = storage
+        return DeveloperServicesClient(loginToken: Config.current.appleID.token)
     }
 
+}
+
+@MainActor
+func withIntegrationDependencies<R>(
+    storage: KeyValueStorage,
+    operation: @escaping () async throws -> R
+) async throws -> R {
+    let anisetteProvider = withDependencies {
+        $0.keyValueStorage = storage
+        $0.httpClient = HTTPClientDependencyKey.liveValue
+        $0.deviceInfoProvider = DeviceInfoProvider(fetch: { Config.current.deviceInfo })
+        $0.rawADIProvider = integrationRawADIProvider()
+    } operation: {
+        ADIDataProvider()
+    }
+
+    return try await withDependencies {
+        $0.keyValueStorage = storage
+        $0.httpClient = HTTPClientDependencyKey.liveValue
+        $0.deviceInfoProvider = DeviceInfoProvider(fetch: { Config.current.deviceInfo })
+        $0.rawADIProvider = integrationRawADIProvider()
+        $0.anisetteDataProvider = anisetteProvider
+    } operation: {
+        try await operation()
+    }
+}
+
+private func integrationRawADIProvider() -> any RawADIProvider {
+    #if os(Linux)
+    XADIProvider()
+    #else
+    OmnisetteADIProvider()
+    #endif
 }

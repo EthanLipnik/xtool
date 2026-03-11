@@ -57,4 +57,29 @@ struct AppleTriple: Sendable {
             nil
         }
     }
+
+    func destination() throws -> AppleDestination {
+        switch (platformName, isSimulator) {
+        case ("ios", false):
+            .iOS
+        case ("ios", true):
+            .iOSSimulator
+        case ("macos", _), ("macosx", _):
+            .macOS
+        case ("tvos", false):
+            .tvOS
+        case ("tvos", true):
+            .tvOSSimulator
+        case ("watchos", false):
+            .watchOS
+        case ("watchos", true):
+            .watchOSSimulator
+        case ("xros", false), ("visionos", false):
+            .visionOS
+        case ("xros", true), ("visionos", true):
+            .visionOSSimulator
+        default:
+            throw StringError("Unsupported Apple target triple '\(architecture)-\(vendor)-\(operatingSystem)-\(environment.joined(separator: "-"))'")
+        }
+    }
 }

@@ -99,8 +99,11 @@ struct NewCommand: AsyncParsableCommand {
             (
                 "xtool.yml",
                 """
-                version: 1
+                version: 2
                 bundleID: com.example.\(name)
+                products:
+                  - kind: application
+                    packageProduct: \(moduleName)
                 """
             ),
 

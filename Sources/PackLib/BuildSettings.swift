@@ -9,27 +9,33 @@ public struct BuildSettings: Sendable {
 
     public let packagePath: String
     public let configuration: BuildConfiguration
+    public let destination: AppleDestination
     public let triple: String
     public let sdkOptions: [String]
     public let options: [String]
+    public let toolchain: String?
 
     public init(
         configuration: BuildConfiguration,
-        triple: String,
+        destination: AppleDestination,
+        triple: String? = nil,
         packagePath: String = ".",
+        toolchain: String? = nil,
         options: [String] = []
     ) async throws {
         self.packagePath = packagePath
         self.configuration = configuration
         self.options = options
-        self.triple = triple
+        self.destination = destination
+        self.triple = triple ?? destination.defaultTriple()
+        self.toolchain = toolchain
 
         // on macOS we don't explicitly install a Swift SDK but
         // SwiftPM vends "implicit" Darwin SDKs as of Swift 6.1,
         // i.e. we can pass `--swift-sdk arm64-apple-ios` and it
         // just works. See:
         // https://github.com/swiftlang/swift-package-manager/pull/6828
-        self.sdkOptions = ["--swift-sdk", triple]
+        self.sdkOptions = ["--swift-sdk", self.triple]
     }
 
     #if os(macOS)
@@ -78,11 +84,12 @@ public struct BuildSettings: Sendable {
             "--package-path", packagePathOverride ?? packagePath,
             "--configuration", configuration.rawValue,
         ]
+        let toolchainArguments = toolchain.map { ["--toolchain", $0] } ?? []
 
         var env = ProcessInfo.processInfo.environment
         env.removeValue(forKey: "SDKROOT")
         process.environment = env
-        process.arguments = baseArguments + extraArguments + sdkOptions + options + arguments
+        process.arguments = baseArguments + extraArguments + toolchainArguments + sdkOptions + options + arguments
         return process
     }
 }

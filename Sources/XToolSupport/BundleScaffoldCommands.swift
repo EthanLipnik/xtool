@@ -55,24 +55,46 @@ private enum BundleScaffolder {
         let schemaURL = URL(fileURLWithPath: "xtool.yml")
         var contents = try String(contentsOf: schemaURL, encoding: .utf8)
 
-        let bundleSnippet = """
-          - kind: \(kind.rawValue)
-            product: \(productName)
+        let productSnippet = """
+          - kind: \(kind.productKind.rawValue)
+            packageProduct: \(productName)
             infoPath: \(infoFileName)
         """
 
-        if let bundlesRange = contents.range(of: "\nbundles:\n") {
-            contents.insert(contentsOf: "\(bundleSnippet)\n", at: bundlesRange.upperBound)
-        } else {
-            if !contents.hasSuffix("\n") {
+        if contents.contains("version: 2") {
+            if let productsRange = contents.range(of: "\nproducts:\n") {
+                contents.insert(contentsOf: "\(productSnippet)\n", at: productsRange.upperBound)
+            } else {
+                if !contents.hasSuffix("\n") {
+                    contents.append("\n")
+                }
+                contents.append("""
+                
+                products:
+                \(productSnippet)
+                """)
                 contents.append("\n")
             }
-            contents.append("""
-            
-            bundles:
-            \(bundleSnippet)
-            """)
-            contents.append("\n")
+        } else {
+            let bundleSnippet = """
+              - kind: \(kind.rawValue)
+                product: \(productName)
+                infoPath: \(infoFileName)
+            """
+
+            if let bundlesRange = contents.range(of: "\nbundles:\n") {
+                contents.insert(contentsOf: "\(bundleSnippet)\n", at: bundlesRange.upperBound)
+            } else {
+                if !contents.hasSuffix("\n") {
+                    contents.append("\n")
+                }
+                contents.append("""
+                
+                bundles:
+                \(bundleSnippet)
+                """)
+                contents.append("\n")
+            }
         }
 
         try contents.write(to: schemaURL, atomically: true, encoding: String.Encoding.utf8)
@@ -178,6 +200,17 @@ private enum BundleScaffolder {
 }
 
 private extension PackSchema.BundleKind {
+    var productKind: PackSchema.ProductKind {
+        switch self {
+        case .appExtension:
+            .appExtension
+        case .extensionKitExtension:
+            .extensionKitExtension
+        case .appClip:
+            .appClip
+        }
+    }
+
     var displayName: String {
         switch self {
         case .appExtension:

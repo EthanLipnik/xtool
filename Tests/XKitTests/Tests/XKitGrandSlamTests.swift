@@ -39,29 +39,31 @@ class XKitGrandSlamTests: XCTestCase {
         authenticator = nil
     }
 
-    func testAuthentication() async throws {
-        let loginData = try await GrandSlamAuthenticateOperation(
-            client: client,
-            username: Config.current.appleID.username,
-            password: Config.current.appleID.password,
-            twoFactorDelegate: authenticator
-        ).authenticate()
-        XCTAssertFalse(loginData.adsid.isEmpty)
-        XCTAssertFalse(loginData.cookie.isEmpty)
-        XCTAssertFalse(loginData.identityToken.isEmpty)
-        XCTAssertFalse(loginData.idmsToken.isEmpty)
-        XCTAssertFalse(loginData.sk.isEmpty)
+    @MainActor func testAuthentication() async throws {
+        try await withIntegrationDependencies(storage: storage) { [self] in
+            let loginData = try await GrandSlamAuthenticateOperation(
+                client: self.client,
+                username: Config.current.appleID.username,
+                password: Config.current.appleID.password,
+                twoFactorDelegate: self.authenticator
+            ).authenticate()
+            XCTAssertFalse(loginData.adsid.isEmpty)
+            XCTAssertFalse(loginData.cookie.isEmpty)
+            XCTAssertFalse(loginData.identityToken.isEmpty)
+            XCTAssertFalse(loginData.idmsToken.isEmpty)
+            XCTAssertFalse(loginData.sk.isEmpty)
 
-        let now = Date() // *before* the actual request is made
+            let now = Date()
 
-        let tokens = try await GrandSlamFetchAppTokensOperation(
-            client: client,
-            apps: [.xcode],
-            loginData: loginData
-        ).perform()
-        let token = try XCTUnwrap(tokens[.xcode], "Xcode token absent from response")
-        XCTAssertGreaterThanOrEqual(token.expiry, now)
-        XCTAssertFalse(token.value.isEmpty)
+            let tokens = try await GrandSlamFetchAppTokensOperation(
+                client: self.client,
+                apps: [.xcode],
+                loginData: loginData
+            ).perform()
+            let token = try XCTUnwrap(tokens[.xcode], "Xcode token absent from response")
+            XCTAssertGreaterThanOrEqual(token.expiry, now)
+            XCTAssertFalse(token.value.isEmpty)
+        }
     }
 
 }

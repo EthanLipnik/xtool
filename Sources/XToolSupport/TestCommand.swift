@@ -2,39 +2,16 @@ import ArgumentParser
 import Foundation
 import PackLib
 
-private struct PackageManifestSummary: Decodable {
-    let name: String
-}
-
 struct TestCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "test",
-        abstract: "Run Swift package tests with Xcode's iOS simulator test flow"
+        abstract: "Build or run Swift package tests for an Apple destination"
     )
 
     @Option(
         name: .shortAndLong,
         help: "Build with configuration"
     ) var configuration: BuildConfiguration = .debug
-
-    @Option(
-        help: "Scheme to test. Defaults to '<package>-Package'."
-    ) var scheme: String?
-
-    @Option(
-        name: .long,
-        help: "Explicit xcodebuild destination specifier."
-    ) var destination: String?
-
-    @Option(
-        name: .long,
-        help: "Simulator device identifier to target."
-    ) var simulatorID: String?
-
-    @Option(
-        name: .long,
-        help: "Write the xcodebuild result bundle to this path."
-    ) var resultBundlePath: String?
 
     @Flag(
         name: .long,
@@ -43,72 +20,62 @@ struct TestCommand: AsyncParsableCommand {
 
     @Option(
         name: .long,
-        help: "Additional xcodebuild argument. Repeat to pass multiple values."
-    ) var xcodebuildArguments: [String] = []
+        help: "Only run tests whose names match the given filter."
+    ) var filter: String?
+
+    @OptionGroup var destinationOptions: DestinationOptions
 
     func run() async throws {
-        #if os(macOS)
-        let resolvedScheme = try await resolvedScheme()
-        let resolvedDestination = destination
-            ?? simulatorID.map { "platform=iOS Simulator,id=\($0)" }
-            ?? "platform=iOS Simulator"
+        let buildSettings = try await destinationOptions.buildSettings(configuration: configuration)
+        let process: Process
 
-        var arguments = [
-            "-scheme", resolvedScheme,
-            "-configuration", configuration.rawValue,
-            "-destination", resolvedDestination,
-        ]
-
-        if enableCodeCoverage {
-            arguments += ["-enableCodeCoverage", "YES"]
+        if canRunTestsNatively(using: buildSettings) {
+            var arguments: [String] = []
+            if enableCodeCoverage {
+                arguments.append("--enable-code-coverage")
+            }
+            if let filter {
+                arguments += ["--filter", filter]
+            }
+            process = try await buildSettings.swiftPMInvocation(
+                forTool: "test",
+                arguments: arguments
+            )
+        } else {
+            if enableCodeCoverage {
+                print("warning: code coverage is only available when tests can run natively")
+            }
+            if let filter {
+                print("warning: test filtering is ignored when only compiling test bundles")
+                _ = filter
+            }
+            process = try await buildSettings.swiftPMInvocation(
+                forTool: "build",
+                arguments: ["--build-tests"]
+            )
+            print("Building test bundles for \(buildSettings.destination.rawValue)...")
         }
-        if let resultBundlePath {
-            arguments += ["-resultBundlePath", resultBundlePath]
-        }
 
-        arguments += xcodebuildArguments
-        arguments.append("test")
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcodebuild")
-        process.arguments = arguments
         process.standardOutput = FileHandle.standardOutput
         process.standardError = FileHandle.standardError
         try await process.runUntilExit()
-        #else
-        let buildSettings = try await BuildSettings(
-            configuration: configuration,
-            triple: PackOperation.defaultTriple
-        )
-        let process = try await buildSettings.swiftPMInvocation(
-            forTool: "test",
-            arguments: []
-        )
-        process.standardOutput = FileHandle.standardOutput
-        process.standardError = FileHandle.standardError
-        try await process.runUntilExit()
-        #endif
-    }
 
-    #if os(macOS)
-    private func resolvedScheme() async throws -> String {
-        if let scheme {
-            return scheme
+        if !canRunTestsNatively(using: buildSettings) {
+            print("Built tests for \(buildSettings.destination.rawValue); execution is not supported yet.")
         }
-        return try await defaultPackageScheme()
     }
 
-    private func defaultPackageScheme() async throws -> String {
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/swift")
-        process.arguments = ["package", "dump-package"]
-        process.standardOutput = pipe
-        try await process.runUntilExit()
+    private func canRunTestsNatively(using buildSettings: BuildSettings) -> Bool {
+        guard buildSettings.destination == .macOS,
+            let hostArchitecture = AppleDestination.currentHostArchitecture()
+        else {
+            return false
+        }
 
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let manifest = try JSONDecoder().decode(PackageManifestSummary.self, from: data)
-        return "\(manifest.name)-Package"
+        let tripleComponents = buildSettings.triple.split(separator: "-")
+        guard let architecture = tripleComponents.first else {
+            return false
+        }
+        return architecture == hostArchitecture
     }
-    #endif
 }
