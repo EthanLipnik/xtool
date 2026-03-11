@@ -172,9 +172,10 @@ xtool import-project MyApp.xcodeproj
 xtool import-project MyWorkspace.xcworkspace --configuration-name Release
 ```
 
-This imports bundle identifiers, supported platforms, `Info.plist` paths, entitlement paths, and host-app
-relationships for supported application, App Clip, and extension targets. It does not attempt to mirror arbitrary
-Xcode build phases.
+This imports bundle identifiers, supported platforms, `Info.plist` paths, entitlement paths, copyable resource file
+references, and host-app relationships for supported application, App Clip, and extension targets. It does not attempt
+to mirror arbitrary Xcode build phases, compiled resources like storyboards or asset catalogs, or unsupported target
+types such as test bundles.
 
 > Troubleshooting:
 >

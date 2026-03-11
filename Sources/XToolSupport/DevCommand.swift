@@ -222,7 +222,7 @@ struct DevRunCommand: AsyncParsableCommand {
 
         #if os(macOS)
         if destination == .iOSSimulator {
-            try await SimInstallOperation(path: output).run()
+            _ = try await AppRunner(destination: .simulator("booted")).installAndLaunch(app: output)
             return
         }
         #endif
@@ -244,7 +244,12 @@ struct DevRunCommand: AsyncParsableCommand {
         defer { print() }
 
         do {
-            try await installer.install(app: output)
+            let bundleID = try await installer.install(app: output)
+            do {
+                try await AppRunner(destination: .device(client)).launch(bundleID: bundleID)
+            } catch {
+                print("\nwarning: Installed app but could not launch it automatically: \(error)")
+            }
         } catch let error as CancellationError {
             throw error
         } catch {
@@ -279,20 +284,3 @@ struct DevCommand: AsyncParsableCommand {
 }
 
 extension BuildConfiguration: ExpressibleByArgument {}
-
-#if os(macOS)
-struct SimInstallOperation {
-    var path: URL
-
-    // TODO: allow customizing this
-    var simulator = "booted"
-
-    func run() async throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        process.arguments = ["simctl", "install", simulator, path.path]
-        try await process.runUntilExit()
-        print("Installed to simulator")
-    }
-}
-#endif

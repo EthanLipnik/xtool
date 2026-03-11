@@ -52,9 +52,12 @@ public struct XcodeProjectImporter {
         }
 
         let missingBundleID = products.contains { $0.bundleID == nil }
+        let inferredOrgID = XcodeProjectImportSupport.organizationIdentifier(
+            from: products.compactMap(\.bundleID)
+        )
         let schema = PackSchemaBase(
             version: .v2,
-            orgID: missingBundleID ? "com.example" : nil,
+            orgID: missingBundleID ? (inferredOrgID ?? "com.example") : nil,
             bundleID: nil,
             product: nil,
             infoPath: nil,
@@ -69,9 +72,15 @@ public struct XcodeProjectImporter {
 
         var warnings = importedProjects.flatMap(\.warnings)
         if missingBundleID {
-            warnings.append(
-                "warning: Some imported targets are missing PRODUCT_BUNDLE_IDENTIFIER. Using top-level orgID 'com.example'."
-            )
+            if let inferredOrgID {
+                warnings.append(
+                    "warning: Some imported targets are missing PRODUCT_BUNDLE_IDENTIFIER. Using inferred top-level orgID '\(inferredOrgID)'."
+                )
+            } else {
+                warnings.append(
+                    "warning: Some imported targets are missing PRODUCT_BUNDLE_IDENTIFIER. Using top-level orgID 'com.example'."
+                )
+            }
         }
 
         return XcodeProjectImportResult(schema: schema, warnings: warnings.uniquedPreservingOrder())
@@ -202,10 +211,17 @@ private extension XcodeProjectImporter {
 
         var warnings: [String] = []
         let defaultConfigurationName = configurationName ?? rootProject.buildConfigurationList.defaultConfigurationName
-        let importedTargets = rootProject.targets.compactMap { target -> ImportedTarget? in
-            guard let nativeTarget = target as? PBXNativeTarget,
-                let kind = productKind(for: nativeTarget.productType) else {
-                return nil
+        var importedTargets: [ImportedTarget] = []
+        for target in rootProject.targets {
+            guard let nativeTarget = target as? PBXNativeTarget else {
+                continue
+            }
+            guard let kind = productKind(for: nativeTarget.productType) else {
+                let typeDescription = nativeTarget.productType?.rawValue ?? "unknown"
+                warnings.append("""
+                warning: Skipping unsupported target '\(nativeTarget.name)' of type '\(typeDescription)' during import.
+                """)
+                continue
             }
 
             let buildConfiguration = selectedConfiguration(
@@ -229,8 +245,21 @@ private extension XcodeProjectImporter {
             let buildSettings = buildConfiguration?.buildSettings ?? [:]
             let projectDirectoryURL = projectURL.deletingLastPathComponent()
             let packageProduct = packageProductName(for: nativeTarget, buildSettings: buildSettings)
+            let resources = try importedResources(
+                for: nativeTarget,
+                projectDirectoryURL: projectDirectoryURL,
+                currentDirectoryURL: currentDirectoryURL,
+                warnings: &warnings
+            )
 
-            return ImportedTarget(
+            let runScriptBuildPhases = nativeTarget.runScriptBuildPhases()
+            if !runScriptBuildPhases.isEmpty {
+                warnings.append("""
+                warning: Target '\(nativeTarget.name)' contains \(runScriptBuildPhases.count) run script build phase(s); xtool import does not translate script phases.
+                """)
+            }
+
+            importedTargets.append(ImportedTarget(
                 targetName: nativeTarget.name,
                 packageProduct: packageProduct,
                 kind: kind,
@@ -239,7 +268,13 @@ private extension XcodeProjectImporter {
                     kind: kind,
                     packageProduct: packageProduct,
                     hostApplication: nil,
-                    bundleID: stringSetting("PRODUCT_BUNDLE_IDENTIFIER", in: buildSettings),
+                    bundleID: resolveBuildSettingValue(
+                        "PRODUCT_BUNDLE_IDENTIFIER",
+                        buildSettings: buildSettings,
+                        projectDirectoryURL: projectDirectoryURL,
+                        targetName: nativeTarget.name,
+                        productName: packageProduct
+                    ),
                     infoPath: resolvePathSetting(
                         "INFOPLIST_FILE",
                         buildSettings: buildSettings,
@@ -257,12 +292,12 @@ private extension XcodeProjectImporter {
                         productName: packageProduct
                     ),
                     iconPath: nil,
-                    resources: nil,
+                    resources: resources.isEmpty ? nil : resources,
                     platforms: supportedPlatforms(from: buildSettings),
                     entryPoint: nil,
                     signing: nil
                 )
-            )
+            ))
         }
 
         let applicationTargetsByName = Dictionary(
@@ -366,6 +401,25 @@ private extension XcodeProjectImporter {
         }
     }
 
+    func resolveBuildSettingValue(
+        _ key: String,
+        buildSettings: [String: Any],
+        projectDirectoryURL: URL,
+        targetName: String,
+        productName: String
+    ) -> String? {
+        guard let value = stringSetting(key, in: buildSettings) else {
+            return nil
+        }
+
+        return XcodeProjectImportSupport.expand(
+            value,
+            projectDirectoryURL: projectDirectoryURL,
+            targetName: targetName,
+            productName: productName
+        )
+    }
+
     func resolvePathSetting(
         _ key: String,
         buildSettings: [String: Any],
@@ -374,30 +428,18 @@ private extension XcodeProjectImporter {
         targetName: String,
         productName: String
     ) -> String? {
-        guard var value = stringSetting(key, in: buildSettings) else {
+        guard let value = stringSetting(key, in: buildSettings) else {
             return nil
         }
 
-        let substitutions = [
-            "$(SRCROOT)": projectDirectoryURL.path,
-            "${SRCROOT}": projectDirectoryURL.path,
-            "$(PROJECT_DIR)": projectDirectoryURL.path,
-            "${PROJECT_DIR}": projectDirectoryURL.path,
-            "$(TARGET_NAME)": targetName,
-            "${TARGET_NAME}": targetName,
-            "$(PRODUCT_NAME)": productName,
-            "${PRODUCT_NAME}": productName,
-        ]
-        for (token, replacement) in substitutions {
-            value = value.replacingOccurrences(of: token, with: replacement)
-        }
-
-        let resolvedURL = URL(fileURLWithPath: value, relativeTo: projectDirectoryURL).standardizedFileURL
-        let currentDirectoryPath = currentDirectoryURL.path + "/"
-        if resolvedURL.path.hasPrefix(currentDirectoryPath) {
-            return String(resolvedURL.path.dropFirst(currentDirectoryPath.count))
-        }
-        return resolvedURL.path
+        let expandedValue = XcodeProjectImportSupport.expand(
+            value,
+            projectDirectoryURL: projectDirectoryURL,
+            targetName: targetName,
+            productName: productName
+        )
+        let resolvedURL = URL(fileURLWithPath: expandedValue, relativeTo: projectDirectoryURL).standardizedFileURL
+        return XcodeProjectImportSupport.relativePath(for: resolvedURL, currentDirectoryURL: currentDirectoryURL)
     }
 
     func supportedPlatforms(from buildSettings: [String: Any]) -> [ApplePlatformFamily]? {
@@ -444,6 +486,41 @@ private extension XcodeProjectImporter {
         }
         return nil
     }
+
+    func importedResources(
+        for target: PBXNativeTarget,
+        projectDirectoryURL: URL,
+        currentDirectoryURL: URL,
+        warnings: inout [String]
+    ) throws -> [String] {
+        guard let resourcesBuildPhase = try target.resourcesBuildPhase() else {
+            return []
+        }
+
+        var importedPaths: [String] = []
+        for buildFile in resourcesBuildPhase.files ?? [] {
+            guard let file = buildFile.file,
+                let fullPath = try file.fullPath(sourceRoot: projectDirectoryURL.path)
+            else {
+                continue
+            }
+
+            let resourceURL = URL(fileURLWithPath: fullPath).standardizedFileURL
+            if let importedPath = XcodeProjectImportSupport.importableResourcePath(
+                for: resourceURL,
+                currentDirectoryURL: currentDirectoryURL
+            ) {
+                importedPaths.append(importedPath)
+            } else if let warning = XcodeProjectImportSupport.unsupportedResourceWarning(
+                resourceURL: resourceURL,
+                targetName: target.name
+            ) {
+                warnings.append(warning)
+            }
+        }
+
+        return importedPaths.uniquedPreservingOrder()
+    }
 }
 
 private extension Array where Element: Equatable {
@@ -453,5 +530,129 @@ private extension Array where Element: Equatable {
             result.append(element)
         }
         return result
+    }
+}
+
+enum XcodeProjectImportSupport {
+    static func expand(
+        _ value: String,
+        projectDirectoryURL: URL,
+        targetName: String,
+        productName: String
+    ) -> String {
+        var expandedValue = value
+        let substitutions = [
+            "$(SRCROOT)": projectDirectoryURL.path,
+            "${SRCROOT}": projectDirectoryURL.path,
+            "$(PROJECT_DIR)": projectDirectoryURL.path,
+            "${PROJECT_DIR}": projectDirectoryURL.path,
+            "$(TARGET_NAME)": targetName,
+            "${TARGET_NAME}": targetName,
+            "$(TARGET_NAME:rfc1034identifier)": rfc1034Identifier(targetName),
+            "${TARGET_NAME:rfc1034identifier}": rfc1034Identifier(targetName),
+            "$(PRODUCT_NAME)": productName,
+            "${PRODUCT_NAME}": productName,
+            "$(PRODUCT_NAME:rfc1034identifier)": rfc1034Identifier(productName),
+            "${PRODUCT_NAME:rfc1034identifier}": rfc1034Identifier(productName),
+        ]
+
+        for (token, replacement) in substitutions {
+            expandedValue = expandedValue.replacingOccurrences(of: token, with: replacement)
+        }
+
+        return expandedValue
+    }
+
+    static func relativePath(
+        for resolvedURL: URL,
+        currentDirectoryURL: URL
+    ) -> String {
+        let currentDirectoryPath = currentDirectoryURL.path + "/"
+        if resolvedURL.path.hasPrefix(currentDirectoryPath) {
+            return String(resolvedURL.path.dropFirst(currentDirectoryPath.count))
+        }
+        return resolvedURL.path
+    }
+
+    static func organizationIdentifier(from bundleIDs: [String]) -> String? {
+        let componentLists = bundleIDs
+            .map { Array($0.split(separator: ".").map(String.init).dropLast()) }
+            .filter { $0.count >= 2 }
+        guard var prefix = componentLists.first else {
+            return nil
+        }
+
+        for components in componentLists.dropFirst() {
+            while prefix.count > 1 && !components.starts(with: prefix) {
+                prefix.removeLast()
+            }
+        }
+
+        guard prefix.count >= 2 else {
+            return nil
+        }
+        return prefix.joined(separator: ".")
+    }
+
+    static func importableResourcePath(
+        for resourceURL: URL,
+        currentDirectoryURL: URL
+    ) -> String? {
+        guard !requiresCompilation(resourceURL) else {
+            return nil
+        }
+        return relativePath(for: resourceURL, currentDirectoryURL: currentDirectoryURL)
+    }
+
+    static func unsupportedResourceWarning(
+        resourceURL: URL,
+        targetName: String
+    ) -> String? {
+        guard requiresCompilation(resourceURL) else {
+            return nil
+        }
+
+        return """
+        warning: Resource '\(resourceURL.lastPathComponent)' in target '\(targetName)' requires Xcode compilation or localization structure and was not imported.
+        """
+    }
+
+    static func requiresCompilation(_ resourceURL: URL) -> Bool {
+        if resourceURL.pathComponents.contains(where: { $0.hasSuffix(".lproj") }) {
+            return true
+        }
+
+        let compiledExtensions: Set<String> = [
+            "storyboard",
+            "xib",
+            "nib",
+            "xcassets",
+            "xcstrings",
+            "xcdatamodel",
+            "xcdatamodeld",
+            "intentdefinition",
+            "mlmodel",
+            "mlpackage",
+            "metal",
+            "metallib",
+            "mom",
+            "momd",
+        ]
+        return compiledExtensions.contains(resourceURL.pathExtension.lowercased())
+    }
+
+    static func rfc1034Identifier(_ value: String) -> String {
+        let lowercased = value.lowercased()
+        let mapped = lowercased.map { character -> Character in
+            if character.isLetter || character.isNumber || character == "-" {
+                return character
+            }
+            return "-"
+        }
+
+        let collapsed = String(mapped)
+            .replacingOccurrences(of: "--+", with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return collapsed.isEmpty ? "product" : collapsed
     }
 }

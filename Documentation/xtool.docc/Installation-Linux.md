@@ -86,7 +86,7 @@ Confirm that xtool is installed correctly:
 
 ```bash
 xtool --help
-# OVERVIEW: Cross-platform Xcode replacement
+# OVERVIEW: Cross-platform Apple app build and deployment tooling
 # ...
 ```
 

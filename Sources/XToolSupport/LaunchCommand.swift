@@ -9,6 +9,18 @@ struct LaunchCommand: AsyncParsableCommand {
         abstract: "Launch an installed app"
     )
 
+    #if os(macOS)
+    @Flag(
+        name: .shortAndLong,
+        help: "Target the iOS Simulator instead of a connected device"
+    ) var simulator = false
+
+    @Option(
+        name: .long,
+        help: "Simulator device identifier to use when launching in Simulator"
+    ) var simulatorID = "booted"
+    #endif
+
     @OptionGroup var connectionOptions: ConnectionOptions
 
     @Argument(
@@ -23,25 +35,14 @@ struct LaunchCommand: AsyncParsableCommand {
     ) var args: [String] = []
 
     func run() async throws {
+        #if os(macOS)
+        if simulator {
+            try await AppRunner(destination: .simulator(simulatorID)).launch(bundleID: bundleID, arguments: args)
+            return
+        }
+        #endif
+
         let client = try await connectionOptions.client()
-
-        let installProxy = try InstallationProxyClient(device: client.device, label: "xtool-inst")
-        let executable: URL
-        do {
-            executable = try installProxy.executable(forBundleID: bundleID)
-        } catch {
-            throw Console.Error("Could not find an installed app with bundle ID '\(bundleID)'")
-        }
-
-        print("Launching \(executable.lastPathComponent)...")
-
-        let debugserver = try DebugserverClient(device: client.device, label: "xtool")
-        guard try debugserver.launch(executable: executable, arguments: args) == "OK" else {
-            throw Console.Error("Launch failed (!OK)")
-        }
-        guard try debugserver.send(command: "qLaunchSuccess", arguments: []) == Data("OK".utf8) else {
-            throw Console.Error("Launch failed (!qLaunchSuccess)")
-        }
-        try debugserver.send(command: "D", arguments: [])
+        try await AppRunner(destination: .device(client)).launch(bundleID: bundleID, arguments: args)
     }
 }

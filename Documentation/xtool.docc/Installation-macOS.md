@@ -1,6 +1,6 @@
 # Installation (macOS)
 
-Set up xtool for declarative, Xcode-free iOS app development on macOS.
+Set up xtool for declarative, SwiftPM-driven iOS app development on macOS without relying on the Xcode build system.
 
 ## Overview
 
@@ -47,7 +47,7 @@ Confirm that xtool is installed correctly:
 
 ```bash
 xtool --help
-# OVERVIEW: Cross-platform Xcode replacement
+# OVERVIEW: Cross-platform Apple app build and deployment tooling
 # ...
 ```
 
