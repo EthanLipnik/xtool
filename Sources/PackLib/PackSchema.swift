@@ -88,6 +88,7 @@ public struct PackSchemaBase: Codable, Sendable {
     public struct ProductDeclaration: Codable, Sendable {
         public var kind: PackSchemaProductKind
         public var packageProduct: String?
+        public var hostApplication: String?
         public var bundleID: String?
         public var infoPath: String?
         public var entitlementsPath: String?
@@ -150,8 +151,12 @@ public struct PackSchema: Sendable {
 
     public var appDeclaration: ProductDeclaration {
         get throws {
-            try Self.appDeclaration(in: productDeclarations)
+            try appDeclaration(named: nil)
         }
+    }
+
+    public var applicationDeclarations: [ProductDeclaration] {
+        productDeclarations.filter { $0.kind == .application }
     }
 
     private static func bundleDeclarations(for base: PackSchemaBase) -> [BundleDeclaration] {
@@ -177,6 +182,7 @@ public struct PackSchema: Sendable {
             ProductDeclaration(
                 kind: .application,
                 packageProduct: base.product,
+                hostApplication: nil,
                 bundleID: base.bundleID,
                 infoPath: base.infoPath,
                 entitlementsPath: base.entitlementsPath,
@@ -192,6 +198,7 @@ public struct PackSchema: Sendable {
             ProductDeclaration(
                 kind: $0.kind.productKind,
                 packageProduct: $0.product,
+                hostApplication: nil,
                 bundleID: $0.bundleID,
                 infoPath: $0.infoPath,
                 entitlementsPath: $0.entitlementsPath,
@@ -207,14 +214,39 @@ public struct PackSchema: Sendable {
     }
 
     private static func appDeclaration(in declarations: [ProductDeclaration]) throws -> ProductDeclaration {
+        try appDeclaration(in: declarations, named: nil)
+    }
+
+    private static func appDeclaration(
+        in declarations: [ProductDeclaration],
+        named packageProduct: String?
+    ) throws -> ProductDeclaration {
         let apps = declarations.filter { $0.kind == .application }
-        guard let app = apps.first else {
-            throw StringError("xtool.yml: Expected exactly one application product.")
+        guard !apps.isEmpty else {
+            throw StringError("xtool.yml: Expected at least one application product.")
         }
-        guard apps.count == 1 else {
-            throw StringError("xtool.yml: Expected exactly one application product.")
+
+        if let packageProduct {
+            guard let app = apps.first(where: { $0.packageProduct == packageProduct }) else {
+                throw StringError("""
+                xtool.yml: Could not find application product '\(packageProduct)'. \
+                Found: \(apps.compactMap(\.packageProduct)).
+                """)
+            }
+            return app
+        }
+
+        guard let app = apps.first, apps.count == 1 else {
+            throw StringError("""
+            xtool.yml: Multiple application products were found (\(apps.compactMap(\.packageProduct))). \
+            Pass --product to choose one.
+            """)
         }
         return app
+    }
+
+    public func appDeclaration(named packageProduct: String?) throws -> ProductDeclaration {
+        try Self.appDeclaration(in: productDeclarations, named: packageProduct)
     }
 
     public init(validating base: PackSchemaBase) throws {
@@ -231,38 +263,97 @@ public struct PackSchema: Sendable {
             }
         }
 
-        let requiresDefaultID = declarations.contains { $0.bundleID == nil }
+        idSpecifier = try Self.resolveIDSpecifier(base: base, declarations: declarations)
+        try validateDeclaredProducts(declarations, version: base.version)
+        try validateApplicationTopology(declarations)
+    }
 
+    private static func resolveIDSpecifier(
+        base: PackSchemaBase,
+        declarations: [ProductDeclaration]
+    ) throws -> IDSpecifier? {
+        let requiresDefaultID = declarations.contains { $0.bundleID == nil }
         if requiresDefaultID {
             switch (base.bundleID, base.orgID) {
             case (let bundleID?, _):
-                idSpecifier = .bundleID(bundleID)
+                return .bundleID(bundleID)
             case (nil, let orgID?):
-                idSpecifier = .orgID(orgID)
+                return .orgID(orgID)
             case (nil, nil):
                 throw StringError("xtool.yml: Must specify either orgID or bundleID")
             }
-        } else {
-            idSpecifier = switch (base.bundleID, base.orgID) {
-            case (let bundleID?, _):
-                .bundleID(bundleID)
-            case (nil, let orgID?):
-                .orgID(orgID)
-            case (nil, nil):
-                nil
-            }
         }
 
+        return switch (base.bundleID, base.orgID) {
+        case (let bundleID?, _):
+            .bundleID(bundleID)
+        case (nil, let orgID?):
+            .orgID(orgID)
+        case (nil, nil):
+            nil
+        }
+    }
+
+    private func validateDeclaredProducts(
+        _ declarations: [ProductDeclaration],
+        version: PackSchemaBase.Version
+    ) throws {
         try validateIconPath(base.iconPath, field: "iconPath")
         for (index, product) in declarations.enumerated() {
             try validateIconPath(product.iconPath, field: "products[\(index)].iconPath")
             try validateEntryPoint(product.entryPoint, kind: product.kind, index: index)
-            if base.version == .v2, product.packageProduct?.isEmpty != false {
+            if version == .v2, product.packageProduct?.isEmpty != false {
                 throw StringError("xtool.yml: products[\(index)].packageProduct is required in schema version 2")
             }
         }
+    }
 
-        _ = try Self.appDeclaration(in: declarations)
+    private func validateApplicationTopology(_ declarations: [ProductDeclaration]) throws {
+        let applicationDeclarations = declarations.enumerated()
+            .filter { $0.element.kind == .application }
+
+        guard !applicationDeclarations.isEmpty else {
+            throw StringError("xtool.yml: Expected at least one application product.")
+        }
+
+        let applicationNames = applicationDeclarations.compactMap(\.element.packageProduct)
+        let uniqueApplicationNames = Set(applicationNames)
+        if uniqueApplicationNames.count != applicationNames.count {
+            let duplicates = Dictionary(grouping: applicationNames, by: { $0 })
+                .filter { $0.value.count > 1 }
+                .map(\.key)
+                .sorted()
+            throw StringError("""
+            xtool.yml: Application products must have unique packageProduct values. \
+            Duplicates: \(duplicates).
+            """)
+        }
+
+        try validateBundleHosts(
+            declarations: declarations,
+            validApplicationNames: uniqueApplicationNames,
+            requiresExplicitHosts: applicationDeclarations.count > 1
+        )
+    }
+
+    private func validateBundleHosts(
+        declarations: [ProductDeclaration],
+        validApplicationNames: Set<String>,
+        requiresExplicitHosts: Bool
+    ) throws {
+        for (index, product) in declarations.enumerated() where product.kind != .application {
+            if requiresExplicitHosts, product.hostApplication?.isEmpty != false {
+                throw StringError("""
+                xtool.yml: products[\(index)].hostApplication is required when more than one application product is declared.
+                """)
+            }
+            if let hostApplication = product.hostApplication,
+                !validApplicationNames.contains(hostApplication) {
+                throw StringError("""
+                xtool.yml: products[\(index)].hostApplication '\(hostApplication)' does not match any application product.
+                """)
+            }
+        }
     }
 
     private func validateEntryPoint(
@@ -332,6 +423,13 @@ public extension PackSchema.ProductDeclaration {
         case .appExtension, .extensionKitExtension:
             return nil
         }
+    }
+}
+
+public extension PackSchemaBase {
+    func encodedYAML() throws -> String {
+        let encoder = YAMLEncoder()
+        return try encoder.encode(self)
     }
 }
 

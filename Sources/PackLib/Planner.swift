@@ -68,10 +68,10 @@ public struct Planner: Sendable {
         )
     }
 
-    public func createPlan() async throws -> Plan {
+    public func createPlan(selectedApplication: String? = nil) async throws -> Plan {
         let graph = try await buildGraph()
 
-        let appDeclaration = try schema.appDeclaration
+        let appDeclaration = try schema.appDeclaration(named: selectedApplication)
         let app = try await product(
             from: graph,
             declaration: appDeclaration,
@@ -79,8 +79,15 @@ public struct Planner: Sendable {
             appBundleID: nil
         )
 
+        let applicationDeclarations = schema.applicationDeclarations
+        let selectedApplicationName = appDeclaration.packageProduct
         let bundleProducts = try await withThrowingTaskGroup(of: Plan.Product.self) { group in
             for declaration in schema.productDeclarations where declaration.kind != .application {
+                let hostApplication = declaration.hostApplication
+                    ?? (applicationDeclarations.count == 1 ? selectedApplicationName : nil)
+                guard hostApplication == selectedApplicationName else {
+                    continue
+                }
                 group.addTask {
                     try await product(
                         from: graph,

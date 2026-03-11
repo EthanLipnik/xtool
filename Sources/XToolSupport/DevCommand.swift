@@ -19,11 +19,19 @@ struct PackOperation {
         }
     }
 
+    struct ProductOptions: ParsableArguments {
+        @Option(
+            name: .long,
+            help: "Application package product to build in multi-application projects"
+        ) var product: String?
+    }
+
     static let defaultDestination: AppleDestination = .iOS
 
     var destination: AppleDestination = Self.defaultDestination
     var triple: String?
     var toolchain: String?
+    var product: String?
     var buildOptions = BuildOptions(configuration: .debug)
     var xcode = false
 
@@ -56,7 +64,7 @@ struct PackOperation {
             buildSettings: buildSettings,
             schema: schema
         )
-        let plan = try await planner.createPlan()
+        let plan = try await planner.createPlan(selectedApplication: product)
 
         #if os(macOS)
         if xcode {
@@ -107,9 +115,12 @@ struct DevXcodeCommand: AsyncParsableCommand {
         discussion: "This option does nothing on Linux"
     )
 
+    @OptionGroup var productOptions: PackOperation.ProductOptions
+
     func run() async throws {
         try await PackOperation(
             destination: .iOS,
+            product: productOptions.product,
             xcode: true
         ).run()
     }
@@ -125,6 +136,7 @@ struct DevBuildCommand: AsyncParsableCommand {
     )
 
     @OptionGroup var packOptions: PackOperation.BuildOptions
+    @OptionGroup var productOptions: PackOperation.ProductOptions
 
     @Flag(
         help: "Output a .ipa file instead of a .app"
@@ -137,6 +149,7 @@ struct DevBuildCommand: AsyncParsableCommand {
             destination: try destinationOptions.resolvedDestination(),
             triple: destinationOptions.triple,
             toolchain: destinationOptions.toolchain,
+            product: productOptions.product,
             buildOptions: packOptions
         ).run()
 
@@ -176,6 +189,7 @@ struct DevRunCommand: AsyncParsableCommand {
     )
 
     @OptionGroup var packOptions: PackOperation.BuildOptions
+    @OptionGroup var productOptions: PackOperation.ProductOptions
     @OptionGroup var destinationOptions: DestinationOptions
 
     #if os(macOS)
@@ -202,6 +216,7 @@ struct DevRunCommand: AsyncParsableCommand {
             destination: destination,
             triple: destinationOptions.triple,
             toolchain: destinationOptions.toolchain,
+            product: productOptions.product,
             buildOptions: packOptions
         ).run()
 

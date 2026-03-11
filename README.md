@@ -44,6 +44,12 @@ CONFIGURATION SUBCOMMANDS:
 DEVELOPMENT SUBCOMMANDS:
   new                     Create a new xtool SwiftPM project
   dev                     Build and run an xtool SwiftPM project
+  test                    Build or run Swift package tests for an Apple
+                          destination
+  archive                 Build a release archive for the current xtool project
+  export                  Export an ipa from an xtool archive or app bundle
+  upload                  Upload an ipa or archive to App Store Connect
+  import-project          Import supported Xcode target metadata into xtool.yml
   ds                      Interact with Apple Developer Services
 
 DEVICE SUBCOMMANDS:

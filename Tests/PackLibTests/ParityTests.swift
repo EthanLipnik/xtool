@@ -79,6 +79,7 @@ import Testing
             .init(
                 kind: .application,
                 packageProduct: "MyApp",
+                hostApplication: nil,
                 bundleID: nil,
                 infoPath: nil,
                 entitlementsPath: nil,
@@ -91,6 +92,7 @@ import Testing
             .init(
                 kind: .appExtension,
                 packageProduct: "WidgetExtension",
+                hostApplication: nil,
                 bundleID: "com.example.widget",
                 infoPath: "Widget-Info.plist",
                 entitlementsPath: "Widget.entitlements",
@@ -111,6 +113,138 @@ import Testing
     #expect(app.entryPoint == .init(kind: .appKit, symbol: "AppDelegate"))
     #expect(app.signing?.mode == PackSchema.SigningMode.none)
     #expect(try schema.appDeclaration.packageProduct == "MyApp")
+}
+
+@Test func schemaRequiresExplicitSelectionForMultipleApplications() throws {
+    let schema = try PackSchema(validating: .init(
+        version: .v2,
+        orgID: "com.example",
+        products: [
+            .init(
+                kind: .application,
+                packageProduct: "PhoneApp",
+                hostApplication: nil,
+                bundleID: "com.example.phone",
+                infoPath: nil,
+                entitlementsPath: nil,
+                iconPath: nil,
+                resources: nil,
+                platforms: [.iOS],
+                entryPoint: nil,
+                signing: nil
+            ),
+            .init(
+                kind: .application,
+                packageProduct: "DesktopApp",
+                hostApplication: nil,
+                bundleID: "com.example.desktop",
+                infoPath: nil,
+                entitlementsPath: nil,
+                iconPath: nil,
+                resources: nil,
+                platforms: [.macOS],
+                entryPoint: nil,
+                signing: nil
+            ),
+        ]
+    ))
+
+    let selectionErrorDescription: String
+    do {
+        _ = try schema.appDeclaration(named: nil)
+        selectionErrorDescription = ""
+    } catch {
+        selectionErrorDescription = String(describing: error)
+    }
+    #expect(selectionErrorDescription.contains("--product"))
+    #expect(try schema.appDeclaration(named: "DesktopApp").packageProduct == "DesktopApp")
+}
+
+@Test func schemaRejectsDuplicateApplicationNames() throws {
+    #expect(throws: Error.self) {
+        _ = try PackSchema(validating: .init(
+            version: .v2,
+            orgID: "com.example",
+            products: [
+                .init(
+                    kind: .application,
+                    packageProduct: "SharedApp",
+                    hostApplication: nil,
+                    bundleID: "com.example.phone",
+                    infoPath: nil,
+                    entitlementsPath: nil,
+                    iconPath: nil,
+                    resources: nil,
+                    platforms: [.iOS],
+                    entryPoint: nil,
+                    signing: nil
+                ),
+                .init(
+                    kind: .application,
+                    packageProduct: "SharedApp",
+                    hostApplication: nil,
+                    bundleID: "com.example.desktop",
+                    infoPath: nil,
+                    entitlementsPath: nil,
+                    iconPath: nil,
+                    resources: nil,
+                    platforms: [.macOS],
+                    entryPoint: nil,
+                    signing: nil
+                ),
+            ]
+        ))
+    }
+}
+
+@Test func schemaRequiresHostApplicationWhenBundlesSpanMultipleApps() throws {
+    #expect(throws: Error.self) {
+        _ = try PackSchema(validating: .init(
+            version: .v2,
+            orgID: "com.example",
+            products: [
+                .init(
+                    kind: .application,
+                    packageProduct: "PhoneApp",
+                    hostApplication: nil,
+                    bundleID: "com.example.phone",
+                    infoPath: nil,
+                    entitlementsPath: nil,
+                    iconPath: nil,
+                    resources: nil,
+                    platforms: [.iOS],
+                    entryPoint: nil,
+                    signing: nil
+                ),
+                .init(
+                    kind: .application,
+                    packageProduct: "DesktopApp",
+                    hostApplication: nil,
+                    bundleID: "com.example.desktop",
+                    infoPath: nil,
+                    entitlementsPath: nil,
+                    iconPath: nil,
+                    resources: nil,
+                    platforms: [.macOS],
+                    entryPoint: nil,
+                    signing: nil
+                ),
+                .init(
+                    kind: .appExtension,
+                    packageProduct: "WidgetExtension",
+                    hostApplication: nil,
+                    bundleID: "com.example.widget",
+                    infoPath: "Widget-Info.plist",
+                    entitlementsPath: nil,
+                    iconPath: nil,
+                    resources: nil,
+                    platforms: [.iOS],
+                    entryPoint: nil,
+                    signing: nil
+                ),
+            ]
+        ))
+    }
 }
 
 @Test func bundlePlacementFollowsBundleKind() {
@@ -163,7 +297,8 @@ import Testing
         signingMode: .adhoc
     )
     #expect(
-        extensionKitProduct.directory(inApp: appRoot, destination: destination).path == "/tmp/MyApp.app/Extensions/ShareExtension.appex"
+        extensionKitProduct.directory(inApp: appRoot, destination: destination).path
+            == "/tmp/MyApp.app/Extensions/ShareExtension.appex"
     )
 
     let appClip = Plan.Product(

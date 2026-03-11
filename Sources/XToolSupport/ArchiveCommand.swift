@@ -41,6 +41,7 @@ struct ArchiveCommand: AsyncParsableCommand {
         name: .shortAndLong,
         help: "Build with configuration"
     ) var configuration: BuildConfiguration = .release
+    @OptionGroup var productOptions: PackOperation.ProductOptions
     @OptionGroup var destinationOptions: DestinationOptions
 
     @Option(
@@ -52,6 +53,7 @@ struct ArchiveCommand: AsyncParsableCommand {
             destination: try destinationOptions.resolvedDestination(),
             triple: destinationOptions.triple,
             toolchain: destinationOptions.toolchain,
+            product: productOptions.product,
             buildOptions: .init(configuration: configuration)
         ).run()
 

@@ -131,6 +131,51 @@ Then, tell xtool about it via `xtool.yml`:
 entitlementsPath: App.entitlements
 ```
 
+## Package multiple apps from one package
+
+Some Swift packages build more than one application product, for example a shared package that emits an iOS app and a
+macOS app, or separate white-label apps. In schema version 2, declare each application explicitly and select the one
+you want to package with `--product`.
+
+```yaml
+version: 2
+orgID: com.example
+products:
+  - kind: application
+    packageProduct: PhoneApp
+    platforms: [iOS]
+  - kind: application
+    packageProduct: DesktopApp
+    platforms: [macOS]
+  - kind: appExtension
+    packageProduct: WidgetExtension
+    hostApplication: PhoneApp
+    infoPath: Widget/Info.plist
+```
+
+Then build or archive the desired app explicitly:
+
+```bash
+xtool dev build --product PhoneApp --destination ios
+xtool archive --product DesktopApp --destination macos
+```
+
+When more than one application product exists, non-application bundles such as extensions and App Clips must set
+`hostApplication` so xtool can attach them to the correct app.
+
+## Import an existing Xcode project
+
+If you already have a `.xcodeproj` or `.xcworkspace`, you can bootstrap `xtool.yml` from the supported target metadata:
+
+```bash
+xtool import-project MyApp.xcodeproj
+xtool import-project MyWorkspace.xcworkspace --configuration-name Release
+```
+
+This imports bundle identifiers, supported platforms, `Info.plist` paths, entitlement paths, and host-app
+relationships for supported application, App Clip, and extension targets. It does not attempt to mirror arbitrary
+Xcode build phases.
+
 > Troubleshooting:
 >
 > There are a number of situations in which xtool may not be able to successfully apply an entitlement to your app.

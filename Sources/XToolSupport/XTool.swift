@@ -29,6 +29,11 @@ private struct XToolCommand: AsyncParsableCommand {
                 subcommands: [
                     NewCommand.self,
                     DevCommand.self,
+                    TestCommand.self,
+                    ArchiveCommand.self,
+                    ExportCommand.self,
+                    UploadCommand.self,
+                    ImportProjectCommand.self,
                     DSCommand.self,
                 ]
             ),
