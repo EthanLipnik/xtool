@@ -61,6 +61,9 @@ DEVICE SUBCOMMANDS:
   See 'xtool help <subcommand>' for detailed help.
 ```
 
+For Linux CI, the intended release flow is `xtool archive` or `xtool export` followed by an external App Store Connect
+uploader such as [`asc`](https://github.com/rudrankriyam/App-Store-Connect-CLI). `xtool upload` remains macOS-only.
+
 ### Library
 
 xtool includes a library that you can use to interact with Apple Developer Services, iOS devices, and more from your own app. You can use this by adding `XKit` as a SwiftPM dependency.

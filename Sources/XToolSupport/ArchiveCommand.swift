@@ -152,7 +152,12 @@ struct ExportCommand: AsyncParsableCommand {
 struct UploadCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "upload",
-        abstract: "Upload an ipa or archive to App Store Connect"
+        abstract: "Upload an ipa or archive to App Store Connect",
+        discussion: """
+        This command currently uses Apple's macOS-only upload tooling. On Linux and Windows/WSL, \
+        build with `xtool archive` or `xtool export` and upload the resulting `.ipa` with an \
+        external App Store Connect client such as `asc`.
+        """
     )
 
     @Argument(
@@ -202,7 +207,18 @@ struct UploadCommand: AsyncParsableCommand {
 
         withExtendedLifetime(keyDirectory) {}
         #else
-        throw Console.Error("`xtool upload` is only supported on macOS right now.")
+        throw Console.Error("""
+        `xtool upload` is only supported on macOS right now because it uses Apple's upload tooling.
+
+        On Linux or Windows/WSL, use `xtool export` to produce an `.ipa`, then upload it with an \
+        external App Store Connect client such as `asc`:
+
+          xtool archive --configuration release
+          xtool export xtool/<AppName>.xcarchive
+          asc builds upload --app <APP_ID> --ipa xtool/<AppName>.ipa
+
+        See the Linux CI docs for more details.
+        """)
         #endif
     }
 }

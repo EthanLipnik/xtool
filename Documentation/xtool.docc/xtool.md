@@ -32,3 +32,4 @@ xtool is a cross-platform (Linux/WSL/macOS) tool for building, packaging, signin
 
 - <doc:Control>
 - <doc:Appex>
+- <doc:Linux-CI>
